@@ -1,0 +1,11 @@
+{
+  "vocab_size": 32000,
+  "sources": {
+    "supreme_court": {"train_tokens": 147000000, "val_tokens": 1400000, "docs_read": 31744, "chars_per_token": 4.783, "quota": 147000000, "short": false},
+    "high_courts": {"train_tokens": 147000000, "val_tokens": 1400000, "docs_read": 257024, "chars_per_token": 4.466, "quota": 147000000, "short": false},
+    "tribunals": {"train_tokens": 63000000, "val_tokens": 600000, "docs_read": 22528, "chars_per_token": 4.562, "quota": 63000000, "short": false},
+    "acts": {"train_tokens": 63000000, "val_tokens": 600000, "docs_read": 7424, "chars_per_token": 4.595, "quota": 63000000, "short": false}
+  },
+  "mix": {"supreme_court": 0.35, "high_courts": 0.35, "tribunals": 0.15, "acts": 0.15},
+  "pseudo_test": 200
+}

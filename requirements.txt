@@ -1,0 +1,11 @@
+# Python 3.10+ (Kaggle image 2026). GPU runs used torch 2.x with CUDA on 2x T4.
+torch>=2.1
+tokenizers>=0.15
+huggingface_hub>=0.20
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+matplotlib>=3.7
+# scoring (Phases 1 and 6 local evaluation)
+rouge_score>=0.1.2
+bert_score>=0.3.13
