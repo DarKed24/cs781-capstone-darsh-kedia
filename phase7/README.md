@@ -9,8 +9,8 @@ Micro-F1@7. Train 827 queries / 4,320 candidates, dev 118 / 1,023, test 237 / 1,
 ## Files
 - `make_lex_zips.py`: builds the 8-rung lexical ablation ladder, scores each on dev, writes the test zips (CPU, minutes).
   `python make_lex_zips.py DATA_DIR OUT_DIR [config ...]` with `DATA_DIR` = `data/Phase_7_PCR`.
-- `../finetune/p7_lex.py`: BM25 (sparse matrix form) with switches for every idea; strips the `CITATION`/`CITATOR INFO` header.
-- `../finetune/p7_dense.py` + `../finetune/kaggle_p7/...ipynb`: passage-level MaxSim bi-encoder on Phase 1 models with
+- `p7_lex.py`: BM25 (sparse matrix form) with switches for every idea; strips the `CITATION`/`CITATOR INFO` header.
+- `p7_dense.py` + `...ipynb`: passage-level MaxSim bi-encoder on Phase 1 models with
   distantly supervised (TF-IDF) alignment, InfoNCE, and z-score fusion with BM25. Ran on Kaggle; dev-only results.
 - The CITATOR INFO data finding (header lists later citing cases; 99% precise on dev) is stripped from all inputs and never used.
 

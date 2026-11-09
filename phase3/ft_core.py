@@ -32,8 +32,9 @@ def device_and_amp():
 
 
 def import_p1(code_dir=None):
-    if code_dir and code_dir not in sys.path:
-        sys.path.insert(0, code_dir)
+    code_dir = code_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "phase1")
+    if code_dir not in sys.path:
+        sys.path.append(code_dir)
     import cs781_p1
     return cs781_p1
 

@@ -5,7 +5,7 @@ Metric: Macro-F1 over all 13 labels, pooled. Train 80 docs / 16.8k sentences, de
 
 **Best submission: Codabench 0.5234**, `ens_all9` (mean log-probs of 9 fine-tuned runs).
 
-Code: `../finetune/p3_rr.py` + `../finetune/ft_core.py`; notebook `../finetune/kaggle_p3/CS781-CP-Phase3-Darsh-Kedia-250311.ipynb`.
+Code: `p3_rr.py` + `ft_core.py`; notebook `CS781-CP-Phase3-Darsh-Kedia-250311.ipynb`.
 
 ## Method
 Consecutive whole sentences are packed into windows of up to 1,024 tokens (each sentence prefixed with `<sep>`,

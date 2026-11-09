@@ -28,23 +28,25 @@ Full ladders (every scored zip with its dev score) are in each phase's README.
 
 ## Repository layout
 
+One folder per phase; each holds the code of that phase's best submission and of every other submission,
+its Kaggle notebook(s) and a README describing every submitted variant.
+
 ```
-phase1/      Phase 1 pretraining: model zoo (cs781_p1.py), tokenizer, Kaggle notebooks, tests
-phase2/      Phase 2 L-NER: tokenizer-agnostic BIO tagger, rules baseline, word2vec, notebooks
-finetune/    Shared fine-tuning toolkit for Phases 3-7 + task modules + Kaggle notebooks
-  ft_core.py         Backbone loader for all 4 archs, LoRA / LoRMA+ / LoRMA-pi / norms / head, KD loss, AMP, LR schedule
-  p3_rr.py           Phase 3 rhetorical roles         kaggle_p3/  notebook
-  p4_cjpe.py         Phase 4 judgment prediction      kaggle_p4/  notebooks (round 1 run; round 2 not run)
-  p5_lsi.py          Phase 5 statute identification  kaggle_p5/  notebooks (round 1 run; round 2 not run)
-  p5_post.py         Phase 5 label-structure post-processing (CPU)
-  p6_summ.py         Phase 6 generators (fine-tuned Phase 1 LMs)   kaggle_p6/
-  p7_lex.py          Phase 7 lexical retrieval (BM25 + our additions)
-  p7_dense.py        Phase 7 passage-level bi-encoder + fusion      kaggle_p7/
-  tests/test_ft.py       CPU unit tests (adapter identity at init, merge equality, padding invariance)
-phase3/ ... phase7/   per-phase README (method, results, how to run) and CPU-only scripts (Phases 6, 7)
-report_figures.py   data-analysis figure and statistics used in the report
-requirements.txt
+phase1/   cs781_p1.py (tokenizer, data prep, 4 architectures, training, generation, pseudo-eval),
+          tokenizer.json, meta.json, Kaggle notebooks (gpt/unilm, encdec, retnet), tests/
+phase2/   lner_model.py (BIO tagger, any encoder incl. Phase 1), lner_utils.py, baseline_rules.py, w2v.py,
+          kaggle/ (from-scratch models), kaggle_unilm/ (best: Phase 1 unilm fine-tuned)
+phase3/   p3_rr.py, ft_core.py, notebook, tests/
+phase4/   p4_cjpe.py, ft_core.py, notebook (+ round-2 notebook, not run)
+phase5/   p5_lsi.py, p5_post.py, ft_core.py, notebook (+ round-2 notebook, not run)
+phase6/   p6_extract.py, make_ladder.py, make_fusion.py, eval_*.py (extractive, best), p6_summ.py, ft_core.py, notebook
+phase7/   p7_lex.py, make_lex_zips.py (lexical, best), p7_dense.py, ft_core.py, notebook (dense + fusion)
+tools/    report_figures.py (data-analysis figure used in the report)
 ```
+
+`ft_core.py` (identical in phases 3-7) is the shared fine-tuning toolkit: it loads any Phase 1 checkpoint
+(gpt, unilm, encdec, retnet; `cs781_p1.py` is found in `../phase1`) and implements full fine-tuning, LoRA,
+LoRMA+, LoRMA-pi, norm-only and frozen-head training, the distillation loss, AMP and the LR schedule.
 
 ## The Phase 1 foundation models
 
@@ -79,11 +81,11 @@ Everything that needs a GPU runs as a **self-contained Kaggle notebook** (each n
 |---|---|---|
 | 1 | `phase1/CS781-CP-Phase1-Darsh-Kedia-250311.ipynb` (set `STAGE` = `prepare_train`, `train`, `generate`, `pseudo_eval`; `ARCH` = `gpt`/`unilm`; separate encdec/retnet copies) | ~2.2 h per arch per 200M tokens (retnet 3.1 h, encdec 1.2 h) |
 | 2 | `phase2/kaggle_unilm/CS781-CP-Phase2-unilm-Darsh-Kedia-250311.ipynb` (best); `phase2/kaggle/...` from-scratch models | ~30 min |
-| 3 | `finetune/kaggle_p3/CS781-CP-Phase3-Darsh-Kedia-250311.ipynb` | 48 min |
-| 4 | `finetune/kaggle_p4/CS781-CP-Phase4-Darsh-Kedia-250311.ipynb` | 4.4 h |
-| 5 | `finetune/kaggle_p5/CS781-CP-Phase5-Darsh-Kedia-250311.ipynb` | 4.0 h |
-| 6 | `finetune/kaggle_p6/CS781-CP-Phase6-Darsh-Kedia-250311.ipynb` (generators); `phase6/make_ladder.py` (CPU extractive, the best zips) | 85 min / ~10 min CPU |
-| 7 | `phase7/make_lex_zips.py` (CPU, the submitted zips); `finetune/kaggle_p7/...` (dense + fusion) | ~10 min CPU / 64 min |
+| 3 | `phase3/CS781-CP-Phase3-Darsh-Kedia-250311.ipynb` | 48 min |
+| 4 | `phase4/CS781-CP-Phase4-Darsh-Kedia-250311.ipynb` | 4.4 h |
+| 5 | `phase5/CS781-CP-Phase5-Darsh-Kedia-250311.ipynb` | 4.0 h |
+| 6 | `phase6/CS781-CP-Phase6-Darsh-Kedia-250311.ipynb` (generators); `phase6/make_ladder.py` (CPU extractive, the best zips) | 85 min / ~10 min CPU |
+| 7 | `phase7/make_lex_zips.py` (CPU, the submitted zips); `phase7/CS781-CP-Phase7-...ipynb` (dense + fusion) | ~10 min CPU / 64 min |
 
 The CPU entry points, for working locally after downloading the data (`huggingface-cli download
 Exploration-Lab/CS-781-Capstone --repo-type dataset --local-dir data`):
@@ -98,10 +100,10 @@ python phase2/lner_model.py train data/Phase_2_LNER runs/charw2v --tokenizer pha
 # Phase 2 best model: Phase 1 unilm as the encoder (GPU recommended)
 python phase2/lner_model.py train data/Phase_2_LNER runs/unilm --tokenizer phase1/tokenizer.json --encoder phase1 --phase1_ckpt unilm/model_best.pt --full --epochs 4
 # Phase 3-5 fine-tuning outside Kaggle (any Phase 1 checkpoint, any method)
-python finetune/p3_rr.py train --data data/Phase_3_RR --out runs/p3/unilm_lorma \
+python phase3/p3_rr.py train --data data/Phase_3_RR --out runs/p3/unilm_lorma \
        --tokenizer phase1/tokenizer.json --ckpt unilm/model_best.pt --method lorma_plus --epochs 12
-python finetune/p4_cjpe.py prep  ...   # then train / ensemble / score / validate, see --help
-python finetune/p5_lsi.py  prep  ...   # then train / ensemble / baseline, see --help
+python phase4/p4_cjpe.py prep  ...   # then train / ensemble / score / validate, see --help
+python phase5/p5_lsi.py  prep  ...   # then train / ensemble / baseline, see --help
 # Phase 6 extractive ladder (CPU) - writes phase6/submissions/<name>/submission.zip
 CS781_ROOT=. python phase6/make_ladder.py
 # Phase 7 lexical ladder (CPU) - scores every config on dev and writes the test zips

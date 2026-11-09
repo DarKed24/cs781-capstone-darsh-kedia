@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds the CPU lexical Phase 7 submissions (an ablation ladder) and scores each config on dev."""
 import json, os, sys, time
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "finetune"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import p7_lex as L
 
 T = dict(k3=1000, k1=6.0, b=1.0, max_df=0.3)
