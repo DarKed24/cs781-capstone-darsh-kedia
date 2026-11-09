@@ -3,26 +3,26 @@
 **Task.** Predict the binary outcome (appeal accepted / rejected) of an Indian Supreme Court judgment whose
 decision has been removed (ILDC). Metric: Macro-F1.
 
-**Best submission: Codabench 0.7539**, `kd_unilm6`: a 6-layer (67M) unilm student distilled from the full fine-tuned unilm.
+**My best submission: 0.7539 on Codabench**, `kd_unilm6`, a 6-layer (67M) unilm student distilled from the fully fine-tuned unilm. Surprisingly, it beat its own teacher and all the ensembles on test.
 
 Code: `p4_cjpe.py` (`prep`, `train`, `ensemble`, `score`, `validate`); notebook
 `CS781-CP-Phase4-Darsh-Kedia-250311.ipynb`. The round-2 notebook
 was built but never run.
 
-## Data hygiene (data finding)
-`Test/test.json` (1,517 docs) is entirely inside `Train/dev.json`, with labels; the other dev docs appear twice.
-`p4_cjpe.py` removes the test ids from dev and de-duplicates it (`dev_clean`, 994 docs, balanced). Train is
+## A problem with the data
+While preparing the data I noticed that `Test/test.json` (1,517 docs) is completely inside `Train/dev.json`, with labels; the other dev docs appear twice.
+so `p4_cjpe.py` removes the test ids from dev and de-duplicates it (`dev_clean`, 994 docs, balanced). Train is
 de-duplicated (37,387 records → 31,677 texts, 59% label 0).
 
 ## Method
 - Text clean-up: ILDC has line breaks inside words ("t\nhe"); a break between letters is joined when the joined word is more frequent than the rarer fragment.
 - Hierarchical tail encoder: the last 4 × 512 tokens, chunks aligned to the end of the document, each chunk
   mean-pooled from the Phase 1 backbone, + position-from-end embedding, BiGRU + attention pooling, 2-way head.
-  Class-balanced CE; decision threshold tuned on dev_clean. Why the tail: TF-IDF + LR on dev_clean scores
-  0.655 on the last 5k chars vs 0.576 on the first 5k (0.665 whole doc).
+  Class-balanced CE; decision threshold tuned on dev_clean. I read the end of the document because a quick TF-IDF + LR
+  check on dev_clean got 0.655 from the last 5k chars but only 0.576 from the first 5k (0.665 on the whole doc).
 - 12k freshly sampled train docs per epoch; two jobs at a time on T4 x2.
 
-## Results (dev_clean Macro-F1 at tuned threshold; Codabench = test)
+## All my submissions (dev_clean Macro-F1 at the tuned threshold; Codabench = test)
 | run | dev | Codabench |
 |---|---|---|
 | **kd_unilm6** (6-layer student) | 0.7686 | **0.7539** |

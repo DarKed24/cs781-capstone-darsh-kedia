@@ -3,18 +3,23 @@
 **Task.** Label every sentence of a judgment with one of 13 rhetorical roles (Corporate Law and IT domains).
 Metric: Macro-F1 over all 13 labels, pooled. Train 80 docs / 16.8k sentences, dev 10 docs, test 10 docs.
 
-**Best submission: Codabench 0.5234**, `ens_all9` (mean log-probs of 9 fine-tuned runs).
+**My best submission: 0.5234 on Codabench**, `ens_all9`, which averages the log-probs of 9 fine-tuned runs.
+
+The test set is only 10 documents, so single runs are noisy. The thing that helped most was averaging more
+models, much more than which fine-tuning method I used.
 
 Code: `p3_rr.py` + `ft_core.py`; notebook `CS781-CP-Phase3-Darsh-Kedia-250311.ipynb`.
 
 ## Method
-Consecutive whole sentences are packed into windows of up to 1,024 tokens (each sentence prefixed with `<sep>`,
-cut to 128 tokens, 75% head / 25% tail), encoded by a Phase 1 backbone, mean-pooled per sentence, passed through
-a BiLSTM over sentence vectors (document context, and right-hand context for the causal archs) and a 13-way
-linear layer. Loss: cross-entropy weighted by inverse-sqrt class frequency. Windows overlap 50% at inference.
-Training windows start at random offsets each epoch. Model selection by dev Macro-F1 (matches `evaluate_phase3.py`).
+I pack consecutive whole sentences into windows of up to 1,024 tokens. Each sentence starts with `<sep>` and is cut
+to 128 tokens (75% from its start, 25% from its end). The Phase 1 backbone encodes the window, I mean-pool the tokens
+of each sentence, and a BiLSTM runs over the sentence vectors. That gives every sentence its neighbours as context,
+and gives gpt and retnet the right-hand context they don't have otherwise. A 13-way linear layer is on top. The loss
+is cross-entropy weighted by inverse-sqrt class frequency because the metric is Macro-F1. Training windows start at a
+random offset each epoch; at test time windows overlap by 50% and I average each sentence's log-probs. I pick the
+best epoch by dev Macro-F1 (my scorer matches `evaluate_phase3.py`).
 
-## Results (dev = 10 docs; Codabench = test)
+## All runs (dev = 10 docs; Codabench = test)
 | run | arch / method | dev | Codabench |
 |---|---|---|---|
 | unilm_frozen_probe | 200M unilm frozen, CPU | 0.335 | 0.3514 |

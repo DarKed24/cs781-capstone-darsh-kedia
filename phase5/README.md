@@ -3,8 +3,10 @@
 **Task.** Multi-label: assign one or more of 100 statute ids to each judgment (statute names masked as
 `<SECTION>` / `<ACT>`). Metric: Macro-F1 over the 100 labels. Train 42,750 / dev 10,181 / test 13,019 docs. Each epoch samples 14k fresh training documents.
 
-**Best submission: Codabench 0.3385**, `ens_greedy` (8-member ensemble chosen on dev). TF-IDF + logistic regression
-reference (not a Phase 1 model, never submitted): 0.405 dev.
+**My best submission: 0.3385 on Codabench**, `ens_greedy`, an ensemble of 8 runs picked on dev. None of my
+fine-tuned models beat a plain TF-IDF + logistic regression reference (0.405 dev), which I used only as a bar and never
+submitted. My guess is that the models only read 2k tokens of each document and saw about one pass over train, while the
+offence words that decide the statute are exactly what bag-of-words picks up.
 
 Code: `p5_lsi.py` (`prep`, `train`, `ensemble`, `baseline`), `p5_post.py` (label-structure
 post-processing), notebook `CS781-CP-Phase5-Darsh-Kedia-250311.ipynb`. The round-2 notebook
@@ -13,10 +15,10 @@ post-processing), notebook `CS781-CP-Phase5-Darsh-Kedia-250311.ipynb`. The round
 ## Method
 First 3 × 512 + last 512 tokens (the whole document for ~70% of docs), each chunk mean-pooled from the backbone,
 + chunk-position embedding, BiGRU, [attention; max] pooling, 100 sigmoids. BCE with pos_weight = sqrt(neg/pos)
-clipped at 10. Thresholds (global or per-label) chosen by an honest cross-half protocol on dev (halves fixed by
-crc32(id)); every document gets at least its top label.
+clipped at 10. To pick thresholds (one global or one per label) without fooling myself, I tune on one half of dev and score on the
+other half (halves fixed by crc32(id)), both ways. Every document gets at least its top label.
 
-## Every Codabench submission (16 scored; dev = honest cross-half Macro-F1)
+## All my submissions (16 scored; dev = cross-half Macro-F1)
 | zip | backbone | method | dev | Codabench |
 |---|---|---|---|---|
 | ens_greedy | 8 runs chosen by forward selection on dev | mean of probabilities, per-label thresholds | 0.3365 | **0.3385** |

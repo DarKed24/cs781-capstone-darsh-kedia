@@ -3,8 +3,9 @@
 **Task.** For each query judgment return exactly 7 ranked candidate ids from the split's pool. Metric:
 Micro-F1@7. Train 827 queries / 4,320 candidates, dev 118 / 1,023, test 237 / 1,727; ~9k tokens per document.
 
-**Best submission: Codabench 0.4566**, `bm25bb_ctx_date`: bigram BM25 tuned for document-length queries
-+ citation-context query + temporal feasibility filter.
+**My best submission: 0.4566 on Codabench**, `bm25bb_ctx_date`: bigram BM25 tuned for whole-document queries, plus a
+second query built from the sentences around each masked citation, plus a filter that drops candidates decided after
+the query (a case can only cite older cases). Each of these pieces is one row of the ladder below.
 
 ## Files
 - `make_lex_zips.py`: builds the 8-rung lexical ablation ladder, scores each on dev, writes the test zips (CPU, minutes).
@@ -12,9 +13,10 @@ Micro-F1@7. Train 827 queries / 4,320 candidates, dev 118 / 1,023, test 237 / 1,
 - `p7_lex.py`: BM25 (sparse matrix form) with switches for every idea; strips the `CITATION`/`CITATOR INFO` header.
 - `p7_dense.py` + `...ipynb`: passage-level MaxSim bi-encoder on Phase 1 models with
   distantly supervised (TF-IDF) alignment, InfoNCE, and z-score fusion with BM25. Ran on Kaggle; dev-only results.
-- The CITATOR INFO data finding (header lists later citing cases; 99% precise on dev) is stripped from all inputs and never used.
+- I found that older SC judgments have a CITATOR INFO header listing later cases that cite them (99% precise on dev).
+  It's a leak, so I strip it from all inputs and never used it.
 
-## Ablation ladder (dev Micro-F1@7 → Codabench)
+## Ablation ladder (dev Micro-F1@7 and Codabench)
 | config | dev | Codabench |
 |---|---|---|
 | bm25_plain (defaults, unigrams) | 0.2012 | 0.2262 |

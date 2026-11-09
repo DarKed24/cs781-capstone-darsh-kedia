@@ -4,13 +4,16 @@
 character-offset spans per document. Metric: strict span Macro-F1 over the 12 labels (`evaluate_phase2.py`). Data: fold1 and fold2 labelled
 (35 docs each, ~4.2k spans per fold), fold3 = test.
 
-**Best submission: Codabench 0.5189**, Phase 1 `unilm` (bidirectional mode) fine-tuned as a BIO tagger on fold1+fold2.
+**My best submission: 0.5189 on Codabench**, the Phase 1 `unilm` (in bidirectional mode) fine-tuned as a BIO tagger on fold1+fold2.
+
+I started with rules and small taggers trained from scratch, since the Phase 1 models weren't ready yet. Once the
+unilm checkpoint existed, fine-tuning it beat my best from-scratch ensemble by about 0.08 on the first try.
 
 ## Method
-- `lner_model.py` is tokenizer-agnostic. `BPETokenizer` wraps the Phase 1 `tokenizer.json` and encodes word by
-  word with leading whitespace, so every punctuation mark is a token boundary (otherwise gold spans such as
-  "Cr.P.C." before a comma end mid-token). Offsets are trimmed of whitespace. Round trip: 27 of 4,120 gold spans
-  do not fall on token boundaries (possessives), a ceiling of 0.994 Macro-F1.
+- `lner_model.py` works with any tokenizer. `BPETokenizer` wraps the Phase 1 `tokenizer.json` and encodes word by
+  word with a leading space, so every punctuation mark starts a new token. Without this, a gold span like
+  "Cr.P.C." followed by a comma ends in the middle of a token. Offsets have whitespace trimmed. In the round trip
+  only 27 of 4,120 gold spans don't line up with token boundaries (mostly possessives), so the ceiling is 0.994.
 - Long documents (10k-114k chars) are tagged in sliding windows of 512 tokens with stride 384; log-probs are
   averaged in the overlaps and decoded with a BIO-constrained Viterbi, then mapped back to character offsets.
 - Encoders: `transformer` (4L/256d from scratch), `bilstm`, `charbilstm` (BiLSTM over [BPE embedding; char-CNN]),
@@ -23,7 +26,7 @@ character-offset spans per document. Metric: strict span Macro-F1 over the 12 la
 - Best model on Kaggle: `kaggle_unilm/CS781-CP-Phase2-unilm-Darsh-Kedia-250311.ipynb` (attach the Phase 1 unilm output and the `HF` secret).
 - CPU: see the root README (`lner_model.py train|predict`, `baseline_rules.py dev|test`).
 
-## Codabench ladder (fold3 strict Macro-F1, 12 scored)
+## All my submissions (fold3 strict Macro-F1, 12 scored)
 | # | zip | model | score |
 |---|---|---|---|
 | 1 | rules_v1 | gazetteer + regex | 0.2873 |

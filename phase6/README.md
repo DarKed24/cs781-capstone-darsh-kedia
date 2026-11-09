@@ -4,8 +4,9 @@
 Metric: BERTScore F1 (roberta-large, no rescaling; ROUGE secondary). 7,030 train pairs, 100 test docs, no dev
 split: a fixed 150-document held-out slice of train (seed 781) is used for every local estimate.
 
-**Best submission: Codabench 0.8522**, `centroid400` (TF-IDF centroid extractive, 400 words). Best generator
-(fine-tuned Phase 1 gpt, extract-then-generate): 0.8330.
+**My best submission: 0.8522 on Codabench**, `centroid400`, a TF-IDF centroid extractive summary of 400 words. My best
+generator (fine-tuned Phase 1 gpt, extract-then-generate) got 0.8330, so in this phase copying real sentences beat
+generating text with my small models.
 
 ## Files
 - `p6_extract.py`: lead, header-skipping lead, TextRank, centroid, supervised sentence scorer (`Scorer`), zip writer.
@@ -13,11 +14,12 @@ split: a fixed 150-document held-out slice of train (seed 781) is used for every
 - `eval_holdout.py`, `eval_fusion.py`: BERTScore/ROUGE on the held-out slice.
 - Generators: `p6_summ.py`, notebook `CS781-CP-Phase6-Darsh-Kedia-250311.ipynb`.
 
-## Key design facts
-- The scorer truncates at 512 roberta tokens, so only the first ~400 words of a summary affect BERTScore: all budgets are ~400 words.
+## Design notes
+- The scorer cuts at 512 roberta tokens, so only about the first 400 words of a summary count for BERTScore. That's why
+  all my summaries are ~400 words.
 - Generators: decoder-only window `[source 576 tokens] <sep> [summary 447 tokens]`, loss on summary tokens only, greedy decoding, no-repeat 4-gram, repetition penalty 1.15. `src=ext` feeds the 470 words chosen by the supervised sentence scorer (extract-then-generate) instead of the lead (`src=head`).
 
-## Every Codabench submission (18 scored; held-out = 60-100 train documents never trained on)
+## All my submissions (18 scored; held-out = 60-100 train documents never trained on)
 | zip | method | held-out BERTScore | Codabench |
 |---|---|---|---|
 | centroid400 | sentences most similar to the TF-IDF document centroid, 400 words, document order | 0.8503 | **0.8522** |
