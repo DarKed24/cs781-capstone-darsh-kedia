@@ -1,27 +1,10 @@
 #!/usr/bin/env python3
 """CS781 Phase 7: prior case retrieval with a Phase 1 bi-encoder, fused with BM25 (Darsh Kedia, 250311).
 
-Lexical stage: p7_lex.py (bigram BM25 + citation-context query + temporal filter), tuned on train/dev.
-Dense stage (this file), on top of it:
-
-  * PASSAGE-LEVEL BI-ENCODER. Judgments are ~9k tokens, far beyond the 1024-token Phase 1 context, and a
-    single citation is usually about one point of law. So a query is represented by its
-    CITATION-CONTEXT PASSAGES (the sentence holding each masked <CITATION> marker, +/-1 sentence), and a
-    candidate by up to MAXC chunks of CLEN tokens spread evenly over the judgment.
-    score(q, c) = mean over query passages of max over candidate chunks of cos(p, chunk)   (MaxSim,
-    after ColBERT, Khattab & Zaharia 2020, at passage instead of token granularity).
-  * DISTANTLY SUPERVISED ALIGNMENT (original idea). The labels say only "query q cites candidate c",
-    not which passage cites it or which part of c is cited. For every gold (q, c) pair we pick the
-    (passage, chunk) pair with the highest TF-IDF cosine as the positive; a hard negative chunk comes
-    from the best-matching chunk of a high-BM25 candidate that q does not cite.
-  * Contrastive InfoNCE with in-batch negatives (Karpukhin et al. 2020, DPR; van den Oord et al. 2018),
-    mean pooling, temperature TAU, on any Phase 1 arch with any ft_core method (full, lora, lorma_plus,
-    or head = frozen backbone, which is the zero-shot baseline with --epochs 0).
-  * Fusion: z(BM25 stage) + w * z(dense), w chosen on dev.
-
-  python p7_dense.py prep  --data DIR --tokenizer tok.json --cache c.pt        (CPU, ~10-15 min)
-  python p7_dense.py train --cache c.pt --ckpt model_best.pt --code_dir . --out RUN --method full ...
-  python p7_dense.py fuse  --cache c.pt --runs RUN1,RUN2 --out DIR             (CPU, writes zips)
+References:
+  [1] Khattab & Zaharia 2020, ColBERT
+  [2] Karpukhin et al. 2020, DPR
+  [3] van den Oord et al. 2018, InfoNCE
 """
 import argparse, json, math, os, random, sys, time, zipfile
 import numpy as np
@@ -39,27 +22,24 @@ LEX_CFG = dict(k3=1000, k1=6.0, b=1.0, max_df=0.3, ctx=1, ctx_w=0.7, temporal=1,
 K = 7
 
 
-# ----------------------------------------------------------------------------------------------
-# prep: tokenise passages/chunks, lexical scores, distant-supervision training pairs
-# ----------------------------------------------------------------------------------------------
 def query_passages(sents, tok):
     hit = [i for i, s in enumerate(sents) if "<CITATION>" in s]
     spans, last = [], -10
-    for i in hit:                                    # merge markers in adjacent sentences
+    for i in hit:
         lo, hi = max(0, i - 1), min(len(sents), i + 2)
         if spans and lo <= spans[-1][1]:
             spans[-1][1] = hi
         else:
             spans.append([lo, hi])
     texts = [" ".join(sents[a:b]) for a, b in spans]
-    if not texts:                                    # no marker: fall back to even chunks
+    if not texts:
         return doc_chunks(" ".join(sents), tok, PLEN, MAXQ)
     if len(texts) > MAXQ:
         texts = [texts[round(i * (len(texts) - 1) / (MAXQ - 1))] for i in range(MAXQ)]
     out = []
     for e in tok.encode_batch(texts):
         ids = e.ids
-        if len(ids) > PLEN:                          # keep the middle, where the marker is
+        if len(ids) > PLEN:
             s = (len(ids) - PLEN) // 2; ids = ids[s:s + PLEN]
         out.append(ids)
     return out
@@ -75,7 +55,6 @@ def doc_chunks(text, tok, n, maxc):
 
 
 def tfidf_rows(seqs, vocab=32000 + 64 + 6):
-    """L2-normalised log-tf idf vectors over token ids (scipy CSR), for the alignment step."""
     from scipy import sparse
     rows, cols, vals = [], [], []
     for r, s in enumerate(seqs):
@@ -108,7 +87,6 @@ def prep(a):
         out[split] = rec
         print(split, len(qids), "queries", len(idx.ids), "cands", f"{time.time()-t0:.0f}s",
               rec.get("lex_f1", ""), flush=True)
-    # distant supervision on train: best (passage, chunk) pair per gold link + a hard negative chunk
     tr = out["train"]; pos = {c: i for i, c in enumerate(tr["cids"])}
     flat_c = [ch for cs in tr["cchunks"] for ch in cs]
     off = np.cumsum([0] + [len(cs) for cs in tr["cchunks"]])
@@ -134,9 +112,6 @@ def prep(a):
     torch.save(out, a.cache)
 
 
-# ----------------------------------------------------------------------------------------------
-# model
-# ----------------------------------------------------------------------------------------------
 class Encoder(nn.Module):
     def __init__(self, backbone, dim=256):
         super().__init__()
@@ -171,7 +146,6 @@ def embed(model, seqs, dev, amp, bs=128):
 
 
 def maxsim_scores(model, rec, dev, amp):
-    """[n_query, n_cand] mean-over-passages of max-over-chunks cosine."""
     flatq = [p for ps in rec["qpass"] for p in ps]; qn = [len(ps) for ps in rec["qpass"]]
     flatc = [c for cs in rec["cchunks"] for c in cs]; cn = [len(cs) for cs in rec["cchunks"]]
     Eq, Ec = embed(model, flatq, dev, amp).to(dev), embed(model, flatc, dev, amp).to(dev)
@@ -179,7 +153,7 @@ def maxsim_scores(model, rec, dev, amp):
     S = torch.empty(len(qn), nC)
     qo = np.cumsum([0] + qn)
     for i in range(len(qn)):
-        sim = Eq[qo[i]:qo[i + 1]] @ Ec.T                                   # [p, total chunks]
+        sim = Eq[qo[i]:qo[i + 1]] @ Ec.T
         best = torch.full((sim.shape[0], nC), -2.0, device=dev).scatter_reduce(
             1, cidx.expand(sim.shape[0], -1), sim, reduce="amax", include_self=True)
         S[i] = best.mean(0).cpu()
@@ -199,7 +173,6 @@ def zrow(S):
 
 
 def fuse_scores(lex, dense, w):
-    # lex already carries the temporal (-1e3) and self (-1e9) penalties on top of its z-scores
     return lex + w * zrow(dense)
 
 
@@ -212,7 +185,7 @@ def train(a):
     peft = C.apply_peft(bb, a.method, a.rank, a.alpha)
     model = Encoder(bb, a.dim).to(dev)
     tr, pairs = data["train"], data["pairs"]
-    if a.align == "random":      # ablation of the distant-supervision alignment: any passage, any chunk
+    if a.align == "random":
         r0 = random.Random(a.seed + 1)
         pairs = [(qi, r0.randrange(len(tr["qpass"][qi])), ci, r0.randrange(len(tr["cchunks"][ci])),
                   nj, r0.randrange(len(tr["cchunks"][nj]))) for qi, _, ci, _, nj, _ in pairs]
@@ -239,8 +212,7 @@ def train(a):
                 ids, va = pad(qs, dev); cids_, cva = pad(cs + ns, dev)
                 with torch.autocast("cuda", dtype=amp, enabled=amp is not None):
                     eq = model(ids, va); ec = model(cids_, cva)
-                logits = eq @ ec.T / a.tau                                  # [B, 2B]
-                # mask in-batch "negatives" that are actually gold for this query (false negatives)
+                logits = eq @ ec.T / a.tau
                 fn = torch.tensor([[tr["cids"][o] in gs for o in owner.tolist()] for gs in gold_sets], device=dev)
                 tgt = torch.arange(len(batch), device=dev)
                 fn[tgt, tgt] = False
@@ -261,7 +233,7 @@ def train(a):
         S = maxsim_scores(model, data[split], dev, amp)
         np.save(f"{a.out}/dense_{split}.npy", S.astype(np.float32))
     Sd = np.load(f"{a.out}/dense_dev.npy"); rec = data["dev"]
-    res["dev_dense_f1"] = micro_f1(Sd + np.where(rec["lex"] < -100, rec["lex"], 0), rec)   # dense + same filters
+    res["dev_dense_f1"] = micro_f1(Sd + np.where(rec["lex"] < -100, rec["lex"], 0), rec)
     res["dev_lex_f1"] = micro_f1(rec["lex"], rec)
     grid = [0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0, 1.5]
     res["dev_fused"] = {str(w): micro_f1(fuse_scores(rec["lex"], Sd, w), rec) for w in grid}
@@ -285,7 +257,6 @@ def write_zip(S, rec, out):
 
 
 def fuse(a):
-    """Ensembles: z(BM25) + w * mean_r z(dense_r), w tuned on dev. Also writes the lexical-only zip."""
     data = torch.load(a.cache, weights_only=False)
     runs = [r for r in a.runs.split(",") if r and os.path.exists(f"{r}/dense_dev.npy")]
     dv, te = data["dev"], data["test"]

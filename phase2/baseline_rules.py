@@ -1,18 +1,8 @@
-"""Phase 2 baseline without any neural model: a gazetteer learned from the
-training gold spans plus a few regexes. Pure Python (needs only lner_utils).
-
-It exists to (1) validate the whole data -> prediction.json -> zip path on the
-real files and (2) give a quick first Codabench submission. It is not a
-"Phase 1 model" experiment and should be described as a non-neural baseline.
+"""Phase 2 baseline without any neural model: gazetteer plus regexes.
 
 Usage:
-  # dev run: learn from fold1, score on fold2 (prints strict macro P/R/F1)
   python baseline_rules.py dev  DATA_DIR
-  # submission: learn from fold1+fold2, predict fold3, validate, zip
   python baseline_rules.py test DATA_DIR OUT_DIR
-
-DATA_DIR holds fold1-text.json, fold1-gold.json, fold2-text.json,
-fold2-gold.json, fold3-text.json (labels.txt optional).
 """
 
 import os
@@ -21,11 +11,11 @@ import sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lner_utils as U  # noqa: E402
+import lner_utils as U
 
-MIN_COUNT = 1        # gazetteer entry must be seen this many times
-MIN_PURITY = 0.6     # share of the entry's majority label among its gold uses
-MIN_LEN = 3          # ignore very short surface strings ("Sh", "Ld")
+MIN_COUNT = 1
+MIN_PURITY = 0.6
+MIN_LEN = 3
 
 _MONTHS = (r"(?:January|February|March|April|May|June|July|August|September|"
            r"October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?")
@@ -41,7 +31,6 @@ REGEXES = [
 
 
 def build_gazetteer(texts, gold):
-    """surface string -> majority label, kept only if frequent and unambiguous."""
     by_surface = defaultdict(Counter)
     for d, spans in gold.items():
         t = texts[d]
@@ -56,7 +45,6 @@ def build_gazetteer(texts, gold):
 
 
 def _gazetteer_regex(gaz):
-    # Longest first so "Supreme Court of India" wins over "Supreme Court".
     alts = sorted(gaz, key=len, reverse=True)
     if not alts:
         return None
@@ -64,7 +52,7 @@ def _gazetteer_regex(gaz):
 
 
 def predict_doc(text, gaz, gaz_re):
-    cands = []  # (start, end, label, priority)
+    cands = []
     if gaz_re is not None:
         for m in gaz_re.finditer(text):
             cands.append((m.start(), m.end(), gaz[m.group(0)], 0))
@@ -73,7 +61,6 @@ def predict_doc(text, gaz, gaz_re):
             s, e = m.start(), m.end()
             while e > s and text[e - 1] in " ,;:": e -= 1
             cands.append((s, e, lab, 1))
-    # Resolve overlaps: gazetteer before regex, then longer spans first.
     cands.sort(key=lambda x: (x[3], -(x[1] - x[0]), x[0]))
     taken, out = [], []
     for s, e, lab, _ in cands:

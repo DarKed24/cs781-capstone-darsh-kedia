@@ -1,6 +1,8 @@
-"""Static token embeddings (word2vec CBOW, Mikolov et al. 2013) trained on the
-Phase 1 Supreme Court pretraining corpus (first ~300MB), on the stand-in BPE ids.
-Course data only; static embeddings are allowed (capstone FAQ)."""
+"""Static token embeddings (word2vec CBOW, Mikolov et al. 2013) on Phase 1 text.
+
+References:
+  [1] Mikolov et al. 2013, word2vec
+"""
 import json, sys, time, numpy as np
 from tokenizers import Tokenizer
 from gensim.models import Word2Vec

@@ -1,45 +1,9 @@
 #!/usr/bin/env python3
 """CS781 Capstone, Phase 4: Court Judgment Prediction, CJPE (Darsh Kedia, 250311).
 
-Binary outcome (1 = appeal accepted, 0 = rejected) of an Indian Supreme Court judgment
-whose final decision has been removed (ILDC [6]). Metric: Macro-F1 over {0, 1}.
-
-Long documents (median ~17k chars, ~3.7k tokens; max 260k chars). What we do:
-  * Text clean-up: the ILDC text has line breaks inside words ("t\\nhe"); a break between
-    two letters is removed when the joined word is more frequent in the corpus than the
-    rarer fragment, otherwise it becomes a space.
-  * Hierarchical tail encoder: the last `n_chunks` x `chunk_len` tokens (default 4 x 512 =
-    the last 2048 tokens; that is the whole document for 22% of dev/test docs and 43% of train docs) are cut into chunks aligned
-    to the END of the document, plus optionally the first `head_chunks` chunks. A TF-IDF
-    check on dev (2026-10-15) showed the end carries the signal: last 5k chars 0.655 vs
-    first 5k chars 0.576 Macro-F1 (whole doc 0.665). ILDC [6] found the same for
-    transformers (last 512 tokens best; hierarchical chunk models best overall).
-  * Each chunk -> Phase 1 backbone (any arch, any technique from ft_core) -> mean pooling
-    -> + learned "position from the end" embedding -> BiGRU over chunks -> attention
-    pooling -> linear layer with 2 logits. Class-balanced cross-entropy.
-  * Decision threshold on log p(1) - log p(0) tuned on dev for Macro-F1.
-
-Data hygiene: the released Test/test.json (1,517 docs) is a subset of Train/dev.json
-(same ids, same texts, dev labels included). Every test id is therefore removed from dev
-here; the remaining dev records are each listed twice and are de-duplicated, leaving
-"dev_clean" (994 docs, 497 per label) as the honest held-out set. Never train
-on the full dev.json: that would be training on the test set.
-
-CLI
-  prep      python p4_cjpe.py prep --data DIR --tokenizer tok.json --cache CACHE.pt
-            Tokenise every doc once (head and tail tokens only); later commands reuse it.
-  train     python p4_cjpe.py train --data DIR --cache CACHE.pt --out RUN --ckpt model_best.pt
-            [--method full|lora|lorma_plus|lorma_pi|norms|head] [--epochs 2] [--docs_per_epoch 12000]
-            [--keep_layers 6 --teacher RUN_T --kd_alpha 0.5 --kd_T 2] [--full] [--save_train_logp N]
-            Writes RUN/{prediction.json, submission.zip, test_logp.pt, dev_logp.pt, run.json}.
-            --method head caches frozen chunk features once and trains only the head (fast).
-  ensemble  python p4_cjpe.py ensemble --data DIR --out OUT RUN1 RUN2 ...
-  score     python p4_cjpe.py score --data DIR RUN_DIR_or_prediction.json   (dev_clean Macro-F1)
-  validate  python p4_cjpe.py validate --data DIR prediction.json
-
-[6] Malik et al. 2021, ILDC for CJPE: Indian Legal Documents Corpus for Court Judgment
-    Prediction and Explanation (ACL 2021). Hierarchical chunk encoding follows their
-    XLNet/RoBERTa + BiGRU models and Chalkidis et al. 2019 (hierarchical BERT on ECHR).
+References:
+  [1] Malik et al. 2021, ILDC for CJPE (ACL 2021)
+  [2] Chalkidis et al. 2019, Neural Legal Judgment Prediction in English
 """
 import argparse
 import glob
@@ -64,9 +28,6 @@ PAD = 0
 NC = 2
 
 
-# --------------------------------------------------------------------------------------
-# Data
-# --------------------------------------------------------------------------------------
 def find(data, name):
     for p in (os.path.join(data, name), os.path.join(data, "Train", name), os.path.join(data, "Test", name)):
         if os.path.exists(p):
@@ -78,12 +39,11 @@ def find(data, name):
 
 
 def load_raw(data, need_train=True):
-    """train (deduplicated by text), dev_clean (test ids removed), test."""
     test = [{"id": str(r["id"]), "text": r["text"]} for r in json.load(open(find(data, "test.json"), encoding="utf-8"))]
     tids = {r["id"] for r in test}
     dev_all = json.load(open(find(data, "dev.json"), encoding="utf-8"))
     dev, seen = [], set()
-    for r in dev_all:   # dev.json lists each non-test doc twice (single + multi instance), same text and label
+    for r in dev_all:
         if str(r["id"]) in tids or r["text"] in seen:
             continue
         seen.add(r["text"])
@@ -96,7 +56,6 @@ def load_raw(data, need_train=True):
                 continue
             seen.add(r["text"])
             train.append({"id": str(r["id"]), "text": r["text"], "label": int(r["label"])})
-        # a few ids repeat with different texts; make keys unique
         cnt = Counter(r["id"] for r in train)
         k = Counter()
         for r in train:
@@ -120,8 +79,6 @@ def word_counts(texts):
 
 
 def clean_text(t, counts):
-    """Join words split by a line break ("t\\nhe" -> "the") when the joined word is more
-    frequent than the rarer fragment; every other line break becomes a space."""
     def fix(m):
         a, b = m.group(1), m.group(2)
         ab = (a + b).lower()
@@ -132,7 +89,6 @@ def clean_text(t, counts):
 
 
 def prep(args):
-    """Tokenise all splits once. Keeps the first `keep_head` and last `keep_tail` tokens."""
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(args.tokenizer)
     data, info = load_raw(args.data, need_train=not args.no_train)
@@ -159,9 +115,6 @@ def prep(args):
 
 
 def chunks_of(rec, chunk_len, n_chunks, head_chunks):
-    """Tail chunks aligned to the end of the document (+ optional head chunks that do not
-    overlap the tail). Returns a list of int lists, in document order, and their positions
-    counted from the end (0 = last chunk); head chunks get positions n_chunks.."""
     tail = rec["tail"].tolist()[-(chunk_len * n_chunks):]
     n_tok = rec["n_tok"]
     tail_chunks = []
@@ -204,11 +157,7 @@ def collate(recs, ids, args, teacher=None):
     return out
 
 
-# --------------------------------------------------------------------------------------
-# Model
-# --------------------------------------------------------------------------------------
 class DocHead(nn.Module):
-    """Chunk vectors [N, H] (+ positions, owners) -> doc logits [B, 2]."""
 
     def __init__(self, H, max_pos, hidden=384, dropout=0.1):
         super().__init__()
@@ -258,11 +207,7 @@ def build(args):
     return CJPEModel(bb, args.n_chunks + args.head_chunks, args.dropout), peft
 
 
-# --------------------------------------------------------------------------------------
-# Metrics / output
-# --------------------------------------------------------------------------------------
 def macro_f1(gold, pred):
-    """sklearn f1_score(average='macro', labels=[0, 1], zero_division=0), as evaluate_phase4.py."""
     f = []
     for c in (0, 1):
         tp = sum(1 for g, p in zip(gold, pred) if g == c and p == c)
@@ -283,7 +228,6 @@ def score_logp(recs, logp, thr=0.0):
 
 
 def tune_thr(recs, logp):
-    """Threshold on log p(1) - log p(0) maximising dev Macro-F1 (scan of the sorted margins)."""
     ids = [i for i in recs if i in logp]
     m = margins(logp, ids)
     cands = sorted(set([0.0] + torch.quantile(m, torch.linspace(0.2, 0.8, 121)).tolist()))
@@ -312,9 +256,6 @@ def write_submission(pred, out_dir):
         z.write(pj, "prediction.json")
 
 
-# --------------------------------------------------------------------------------------
-# Train / predict
-# --------------------------------------------------------------------------------------
 def batches_by_length(recs, ids, args, batch_docs):
     order = sorted(ids, key=lambda i: -min(recs[i]["n_tok"], args.chunk_len * (args.n_chunks + args.head_chunks)))
     return [order[k:k + batch_docs] for k in range(0, len(order), batch_docs)]
@@ -336,7 +277,6 @@ def doc_logp(model, recs, ids, args, device, amp):
 
 @torch.no_grad()
 def chunk_features(model, recs, ids, args, device, amp, log):
-    """Frozen backbone: chunk vectors per doc, computed once (method head)."""
     model.eval()
     feats, t0 = {}, time.time()
     bl = batches_by_length(recs, ids, args, args.eval_batch)
@@ -407,7 +347,6 @@ def train(args):
                     "trainable_total": n_tr, "train_pool": len(pool), "docs_per_epoch": per_epoch,
                     "pool_labels": dict(lab_counts), "dev_docs": len(dev_ids), "device": str(device),
                     "amp": str(amp), "tokens_per_doc": args.chunk_len * (args.n_chunks + args.head_chunks)}))
-    # class-balanced CE (train is 59% label 0; dev and test are balanced)
     n = sum(lab_counts.values())
     cw = torch.tensor([n / (2 * max(lab_counts.get(c, 1), 1)) for c in (0, 1)], device=device)
     best, best_state, hist = -1.0, None, []

@@ -40,9 +40,9 @@ finetune/    Shared fine-tuning toolkit for Phases 3-7 + task modules + Kaggle n
   p6_summ.py         Phase 6 generators (fine-tuned Phase 1 LMs)   kaggle_p6/
   p7_lex.py          Phase 7 lexical retrieval (BM25 + our additions)
   p7_dense.py        Phase 7 passage-level bi-encoder + fusion      kaggle_p7/
-  build_pN_notebook.py   regenerate each self-contained notebook from the .py files
   tests/test_ft.py       CPU unit tests (adapter identity at init, merge equality, padding invariance)
 phase3/ ... phase7/   per-phase README (method, results, how to run) and CPU-only scripts (Phases 6, 7)
+report_figures.py   data-analysis figure and statistics used in the report
 requirements.txt
 ```
 
@@ -63,8 +63,8 @@ prepared once, mixed 35% Supreme Court, 35% High Courts, 15% tribunals, 15% acts
 
 ## How to run
 
-Everything that needs a GPU runs as a **self-contained Kaggle notebook** (each notebook writes its own
-`.py` files with `%%writefile`, so nothing has to be uploaded besides the notebook). Common setup:
+Everything that needs a GPU runs as a **self-contained Kaggle notebook** (each notebook writes the same
+`.py` files found in this repository with `%%writefile`, so nothing has to be uploaded besides the notebook). Common setup:
 
 1. Kaggle: *New notebook* > *File* > *Import notebook*, accelerator **GPU T4 x2**, Internet **on**.
 2. Add-ons > Secrets: add a secret named **`HF`** holding a Hugging Face read token that has accepted the
@@ -133,8 +133,6 @@ Phases 3, 4, 5 (and LoRMA in 6 and 7).
   them; matching a query's own citation against it recovers gold links at 99% precision on dev. Both
   header fields are stripped from every document before modelling (`p7_lex.strip_meta`), and no submission used it.
 
-## Use of AI assistance
+## References
 
-AI coding assistance was used as permitted by the course (from 7 October 2026); its extent is stated in the LLM usage
-declaration of the report. No external LLM API is called anywhere in the pipeline. References for every borrowed idea are
-in the module docstrings and in the report's bibliography.
+Papers behind each method are listed at the top of each module and in the report's bibliography.

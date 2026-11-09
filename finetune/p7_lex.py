@@ -1,29 +1,8 @@
 #!/usr/bin/env python3
 """CS781 Phase 7: prior case retrieval, lexical part (Darsh Kedia, 250311).
 
-Task: for each query judgment, rank the split's candidate pool and output exactly 7 candidate ids.
-Metric: Micro-F1@7 (evaluate_phase7.py). Every query also sits in its own candidate pool, so the
-query's own id is always removed first.
-
-Pieces (each one is a switch, so every piece can be ablated):
-  * BM25 over the split's candidate pool (Robertson & Zaragoza 2009), sparse-matrix form so a whole
-    ~40k-character judgment can be the query. Query-term saturation k3 keeps long queries sane.
-  * ngram range: unigrams, or unigrams + bigrams (legal phrases such as "natural justice").
-  * CITATION-CONTEXT QUERY (original idea): the organisers replaced every citation in the query with
-    the token <CITATION>. The sentences around those markers describe exactly the cases that were
-    cited, so we build a second, focused query from a +/-W sentence window around each marker and
-    fuse its BM25 scores with the whole-document query.
-  * TEMPORAL FEASIBILITY FILTER (original idea): a judgment can only cite cases decided before it.
-    The query's year comes from its "DATE OF JUDGMENT" header; a candidate's decision year is at
-    least the largest year it mentions. Candidates that mention a year after the query's year are
-    pushed below all others.
-  * CITATION PRIOR: how often a candidate id was a gold citation in the training queries
-    (train for dev experiments, train+dev for test). Some cases (landmark judgments) are cited by many
-    queries; the prior is added as lam * log(1 + count).
-
-  python p7_lex.py eval  --data DIR --split dev [--cfg JSON]       # score one config on train/dev
-  python p7_lex.py sweep --data DIR                               # ablation table on train and dev
-  python p7_lex.py predict --data DIR --cfg JSON --out DIR         # writes prediction.json + submission.zip
+References:
+  [1] Robertson & Zaragoza 2009, The Probabilistic Relevance Framework: BM25 and Beyond
 """
 import argparse, json, math, os, re, sys, time, zipfile
 from collections import Counter
@@ -37,9 +16,6 @@ TOK = re.compile(r"[a-z][a-z0-9]+|\d+[a-z]?")
 STOP = set(ENGLISH_STOP_WORDS) | {"said", "learned", "court", "case", "section", "act", "also", "would"}
 YEAR = re.compile(r"(?<!\d)(1[89]\d\d|20[0-2]\d)(?!\d)")
 DOJ = re.compile(r"DATE OF JUDGMENT:?\s*(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})")
-# Supreme Court judgments carry a header "CITATION: <own reporter cites> CITATOR INFO : <LATER cases
-# that cite this one>". CITATOR INFO is a leak (a candidate's header can name the query that cites it),
-# so by default both header fields are cut from queries and candidates (cfg strip_meta=1).
 META = re.compile(r"CITATION\s*:.*?(?=\bACT\s*:|\bHEADNOTE\s*:|$)", re.S)
 
 
@@ -68,7 +44,6 @@ def analyzer(text):
 
 
 def make_analyzer(n_max, n_min=1):
-    """Word n-grams n_min..n_max over the stop-worded token stream."""
     def an(text):
         t = analyzer(text); out = []
         for n in range(n_min, n_max + 1):
@@ -86,7 +61,6 @@ def query_year(text):
 
 
 def min_decision_year(text):
-    """Decision year from the header if present, else a lower bound: the latest year it mentions."""
     m = DOJ.search(text[:3000])
     if m:
         return int(m.group(3))
@@ -95,7 +69,6 @@ def min_decision_year(text):
 
 
 def citation_context(sents, w):
-    """Sentences within +/-w of a sentence that contains <CITATION>."""
     hit = [i for i, s in enumerate(sents) if "<CITATION>" in s]
     keep = sorted({j for i in hit for j in range(max(0, i - w), min(len(sents), i + w + 1))})
     return " ".join(sents[j] for j in keep)
@@ -122,7 +95,6 @@ class Index:
         self.W = sparse.csr_matrix((w.astype(np.float32), (tf.row, tf.col)), shape=tf.shape)
 
     def score(self, qtexts, k3=8.0):
-        """BM25 scores, one row per query text, one column per candidate."""
         qtf = self.cv.transform(qtexts).tocsr().astype(np.float32)
         qtf.data = qtf.data * (k3 + 1) / (qtf.data + k3)
         return np.asarray((qtf @ self.W.T).todense())
@@ -152,7 +124,7 @@ def retrieve(queries, cands, cfg, prior_counts=None, index=None, return_scores=F
             y = query_year(full[i])
             if y:
                 S[i, idx.years > y + cfg["temporal"] - 1] -= 1e3
-    for i, q in enumerate(qids):            # never return the query itself
+    for i, q in enumerate(qids):
         if q in idx.pos:
             S[i, idx.pos[q]] = -1e9
     top = np.argsort(-S, axis=1)[:, :K]

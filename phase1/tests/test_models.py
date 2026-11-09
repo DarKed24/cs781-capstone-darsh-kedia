@@ -3,14 +3,12 @@ import os; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__fil
 import cs781_p1 as P
 torch.manual_seed(0)
 
-# 1. full-size parameter counts (meta device: no memory)
 for arch in ["gpt", "encdec", "unilm", "retnet"]:
     cfg = P.RunConfig(arch=arch)
     with torch.device("meta"):
         m = P.build_model(cfg.model_config(32000))
     print(f"{arch:7s} {P.count_params(m)/1e6:7.2f}M params")
 
-# 2. incremental decoding == full forward (left padding included)
 def full_logits(m, arch, seq):
     ids = torch.tensor([seq])
     if arch == "retnet":
@@ -32,7 +30,6 @@ for arch in ["gpt", "unilm", "retnet"]:
     print(f"{arch:7s} incremental vs full max |dlogit| = {max(errs):.2e}")
     assert max(errs) < 1e-3
 
-# encdec: cached decoding vs teacher-forced decode
 cfg = P.RunConfig(arch="encdec", smoke=True).apply_smoke()
 mc = cfg.model_config(300); m = P.build_model(mc).eval()
 seqs = [torch.randint(10, 300, (n,)).tolist() for n in (9, 15)]
@@ -48,7 +45,6 @@ for b in range(2):
     errs.append((logits[b] - ref).abs().max().item())
 print(f"encdec  cached vs teacher-forced max |dlogit| = {max(errs):.2e}"); assert max(errs) < 1e-3
 
-# 3. span corruption sanity
 import numpy as np
 rng = np.random.default_rng(0)
 mask = P.random_spans_mask(768, 0.15, 3.0, rng); print("span mask density", mask.mean())

@@ -1,27 +1,4 @@
-"""Phase 2 (L-NER) neural pipeline: tokenizer -> encoder -> BIO tagger.
-
-Model-agnostic on purpose. Anything that maps input_ids [B, T] (+ mask) to
-hidden states [B, T, H] can be dropped in as the encoder, so the same loop
-trains the from-scratch baselines here and, later, the Phase 1 foundation
-model(s) (see `load_phase1_encoder` and `CallableEncoder`).
-
-Tokenizer interface: `encode(text) -> (ids, offsets)` with character offsets
-into the original string. `BPETokenizer` wraps a Hugging Face `tokenizers`
-byte-level BPE saved as tokenizer.json, which is the format the Phase 1 thread
-settled on (vocab 32k, pad=0 unk=1 <s>=2 </s>=3 mask=4 sep=5 + extra_id_*,
-ByteLevel pre-tokenizer, add_prefix_space=False, trim_offsets=True).
-
-Everything is trained from random initialisation: no pretrained weights,
-no external data, no LLM APIs.
-
-CLI (run with python3 -I when DATA_DIR holds downloaded files):
-  # train a stand-in tokenizer on the training folds (same settings as Phase 1)
-  python lner_model.py tokenizer DATA_DIR OUT/tokenizer.json [--vocab 32000]
-  # train on fold1, pick the best epoch on fold2 (strict macro F1)
-  python lner_model.py train DATA_DIR RUN_DIR --tokenizer TOK.json [--encoder transformer|bilstm] [--full]
-  # predict fold3 -> RUN_DIR/prediction.json + submission.zip (validated)
-  python lner_model.py predict DATA_DIR RUN_DIR
-"""
+"""Phase 2 (L-NER) neural pipeline: tokenizer -> encoder -> BIO tagger."""
 
 import argparse
 import json
@@ -36,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lner_utils as U  # noqa: E402
+import lner_utils as U
 
 SEED = 42
 TAGS = ["O"] + [f"{p}-{l}" for l in U.LABELS for p in ("B", "I")]
@@ -53,13 +30,7 @@ def set_seed(seed=SEED):
         torch.cuda.manual_seed_all(seed)
 
 
-# ----------------------------------------------------------------------------
-# Tokenizer
-# ----------------------------------------------------------------------------
-
 def train_bpe(texts, out_path, vocab_size=32000):
-    """Byte-level BPE with the Phase 1 settings. Stand-in until the Phase 1
-    tokenizer.json exists; only the training text differs."""
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, processors, trainers
     tok = Tokenizer(models.BPE(unk_token="<unk>"))
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
@@ -75,7 +46,6 @@ def train_bpe(texts, out_path, vocab_size=32000):
 
 
 class BPETokenizer:
-    """encode(text) -> (ids, [(start, end)]) for a tokenizers tokenizer.json."""
 
     def __init__(self, path, split_punct=True):
         from tokenizers import Tokenizer
@@ -89,11 +59,6 @@ class BPETokenizer:
         if not self.split_punct:
             enc = self.tok.encode(text, add_special_tokens=False)
             return enc.ids, enc.offsets
-        # The GPT-2 style ByteLevel regex keeps runs of punctuation together
-        # (".," or ".)"), so a gold span like "Cr.P.C." followed by "," would
-        # end inside a token. Encode each word / punctuation mark with its
-        # leading whitespace instead: words get the same ids as in running
-        # text, and every punctuation mark becomes its own token boundary.
         pieces, starts, prev = [], [], 0
         for s, e in U.word_offsets(text):
             pieces.append(text[prev:e]); starts.append(prev); prev = e
@@ -103,8 +68,6 @@ class BPETokenizer:
         for enc, base in zip(self.tok.encode_batch(pieces, add_special_tokens=False), starts):
             ids += enc.ids
             offs += [(base + a, base + b) for a, b in enc.offsets]
-        # trim_offsets does not trim the leading space of a sequence's first
-        # token, which is every piece here, so trim whitespace ourselves.
         out = []
         for a, b in offs:
             while a < b and text[a].isspace(): a += 1
@@ -113,12 +76,7 @@ class BPETokenizer:
         return ids, out
 
 
-# ----------------------------------------------------------------------------
-# Span <-> token tags (zero-length tokens, e.g. trimmed whitespace, are ignored)
-# ----------------------------------------------------------------------------
-
 def token_tags(offsets, spans):
-    """Tag ids per token; zero-length tokens get IGNORE. Returns (ids, n_misaligned)."""
     keep = [i for i, (s, e) in enumerate(offsets) if e > s]
     tags, mis = U.spans_to_bio([offsets[i] for i in keep], spans)
     out = [IGNORE] * len(offsets)
@@ -133,7 +91,6 @@ def decode_tags(offsets, tag_ids):
 
 
 def _allowed_transitions():
-    """allowed[i, j]: tag j may follow tag i under BIO (I-X only after B-X/I-X)."""
     n = len(TAGS)
     allowed = torch.ones(n, n, dtype=torch.bool)
     start = torch.ones(n, dtype=torch.bool)
@@ -150,7 +107,6 @@ _ALLOWED, _START = _allowed_transitions()
 
 
 def viterbi_bio(logp):
-    """Best BIO-valid tag sequence for log-probs [T, n_tags] (no learned CRF)."""
     T, n = logp.shape
     if T == 0:
         return []
@@ -159,7 +115,7 @@ def viterbi_bio(logp):
     score = torch.where(_START, logp[0], torch.full((), neg))
     back = torch.zeros(T, n, dtype=torch.long)
     for t in range(1, T):
-        cand = score[:, None] + trans  # [from, to]
+        cand = score[:, None] + trans
         score, back[t] = cand.max(0)
         score = score + logp[t]
     best = [int(score.argmax())]
@@ -168,13 +124,7 @@ def viterbi_bio(logp):
     return best[::-1]
 
 
-# ----------------------------------------------------------------------------
-# Encoders (all from random init). Any module with .hidden_size and
-# forward(input_ids, attention_mask) -> [B, T, H] works.
-# ----------------------------------------------------------------------------
-
 class TransformerEncoder(nn.Module):
-    """Small pre-norm bidirectional transformer with learned positions."""
 
     def __init__(self, vocab_size, hidden=256, layers=4, heads=4, ff=1024, max_len=1024, dropout=0.1, pad_id=0):
         super().__init__()
@@ -195,7 +145,6 @@ class TransformerEncoder(nn.Module):
 
 
 class BiLSTMEncoder(nn.Module):
-    """Embedding + BiLSTM; trains well on little data and runs fine on CPU."""
 
     def __init__(self, vocab_size, hidden=256, layers=2, emb=256, dropout=0.3, pad_id=0, **_):
         super().__init__()
@@ -215,14 +164,6 @@ class BiLSTMEncoder(nn.Module):
 
 
 class CharBiLSTMEncoder(nn.Module):
-    """BiLSTM over [token embedding ; char-CNN of the token's characters].
-
-    The characters come from a fixed per-vocab-id table built from the
-    tokenizer, so the data pipeline still only passes token ids. Rare or
-    unseen-in-training tokens (party and witness names) share character
-    n-gram features (char-CNN as in Ma & Hovy 2016, "End-to-end Sequence
-    Labeling via Bi-directional LSTM-CNNs-CRF").
-    """
 
     def __init__(self, vocab_size, tokenizer_path, hidden=384, layers=2, emb=256, char_emb=32,
                  char_filters=96, max_chars=16, dropout=0.3, pad_id=0, **_):
@@ -245,8 +186,8 @@ class CharBiLSTMEncoder(nn.Module):
 
     def forward(self, input_ids, attention_mask):
         B, T = input_ids.shape
-        ch = self.char_table[input_ids].view(B * T, -1)          # [BT, C]
-        c = self.conv(self.cemb(ch).transpose(1, 2))              # [BT, F, C]
+        ch = self.char_table[input_ids].view(B * T, -1)
+        c = self.conv(self.cemb(ch).transpose(1, 2))
         c = c.masked_fill((ch == 0)[:, None, :], -1e4).max(-1).values
         c = torch.where(c < -1e3, torch.zeros_like(c), c).view(B, T, -1)
         x = self.drop(torch.cat([self.tok(input_ids), c], -1))
@@ -258,14 +199,6 @@ class CharBiLSTMEncoder(nn.Module):
 
 
 class CallableEncoder(nn.Module):
-    """Wrap a Phase 1 model as an encoder.
-
-    fn(module, input_ids, attention_mask) -> [B, T, H]. For a Hugging Face
-    style model: lambda m, ids, am: m(input_ids=ids, attention_mask=am,
-    output_hidden_states=True).hidden_states[-1]. For a decoder-only (causal)
-    model each token only sees its left context; consider running it on the
-    text and its reverse and concatenating (hidden_size doubles).
-    """
 
     def __init__(self, module, hidden_size, fn):
         super().__init__()
@@ -276,7 +209,6 @@ class CallableEncoder(nn.Module):
 
 
 def load_phase1_encoder(module, ckpt_path, strip_prefix="", map_location="cpu"):
-    """Load Phase 1 weights into `module` (strict=False) and report what did not match."""
     sd = torch.load(ckpt_path, map_location=map_location)
     if isinstance(sd, dict) and "state_dict" in sd:
         sd = sd["state_dict"]
@@ -290,17 +222,6 @@ def load_phase1_encoder(module, ckpt_path, strip_prefix="", map_location="cpu"):
 
 
 def phase1_encoder(ckpt_path, p1_dir=None, device="cpu"):
-    """Encoder from a Phase 1 export (model_final.pt / model_best.pt / last.pt),
-    using the model code in the Phase 1 module cs781_p1.py (`load_model`).
-
-    Feature extractor per architecture (see cs781_p1 docstrings):
-      gpt    DecoderLM.hidden, causal (left context only)
-      unilm  DecoderLM.hidden with mode=1, causal=False (bidirectional)
-      encdec EncDecLM.encode (bidirectional encoder only; decoder unused)
-      retnet RetNetLM.hidden (causal decay retention)
-    Our batches are right-padded; padding is masked for the bidirectional
-    archs and cannot leak into real tokens for the causal ones.
-    """
     if p1_dir:
         sys.path.insert(0, p1_dir)
     import cs781_p1 as P1
@@ -336,12 +257,7 @@ class Tagger(nn.Module):
         return self.head(self.drop(self.encoder(input_ids, attention_mask)))
 
 
-# ----------------------------------------------------------------------------
-# Data
-# ----------------------------------------------------------------------------
-
 def encode_docs(tokenizer, texts, gold=None):
-    """{doc: (ids, offsets, tag_ids|None)} and alignment stats."""
     out, mis, total = {}, 0, 0
     for d, t in texts.items():
         ids, offs = tokenizer.encode(t)
@@ -374,21 +290,15 @@ def collate(batch, pad_id):
     return ids, am, lab
 
 
-# ----------------------------------------------------------------------------
-# Train / predict
-# ----------------------------------------------------------------------------
-
 @torch.no_grad()
 def predict_docs(model, encoded, max_len, stride, device, batch_size=16):
-    """Average log-probs over overlapping windows, then BIO-constrained Viterbi."""
     return predict_ensemble([model], encoded, max_len, stride, device, batch_size)
 
 
 @torch.no_grad()
 def doc_logprobs(model, encoded, max_len, stride, device, batch_size=16):
-    """{doc: [T, n_tags] log-probs averaged over overlapping windows}."""
     model.eval()
-    jobs = []  # (doc, lo, hi)
+    jobs = []
     acc = {}
     for d, (ids, _, _) in encoded.items():
         acc[d] = (torch.zeros(len(ids), len(TAGS)), torch.zeros(len(ids), 1))
@@ -409,7 +319,6 @@ def doc_logprobs(model, encoded, max_len, stride, device, batch_size=16):
 
 
 def predict_ensemble(models, encoded, max_len, stride, device, batch_size=16):
-    """Mean of the models' log-probs (seed ensemble), then BIO-constrained Viterbi."""
     total = None
     for m in models:
         lp = doc_logprobs(m, encoded, max_len, stride, device, batch_size)
@@ -428,7 +337,6 @@ def build_model(cfg, vocab_size, pad_id):
 
 
 def train(cfg, tokenizer, train_texts, train_gold, dev_texts=None, dev_gold=None, log=print, model=None):
-    """Returns (model, history). Keeps the weights of the best dev epoch."""
     set_seed(cfg.get("seed", SEED))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     enc_train, (mis, tot) = encode_docs(tokenizer, train_texts, train_gold)
@@ -439,7 +347,6 @@ def train(cfg, tokenizer, train_texts, train_gold, dev_texts=None, dev_gold=None
         model = build_model(cfg, tokenizer.vocab_size, tokenizer.pad_id)
     model.to(device)
     log(f"params {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M, windows {len(examples)}, device {device}")
-    # Optional lower learning rate for a pretrained (Phase 1) encoder than for the new head.
     enc_params = [p for p in model.encoder.parameters() if p.requires_grad]
     enc_ids = {id(p) for p in enc_params}
     rest = [p for p in model.parameters() if p.requires_grad and id(p) not in enc_ids]
@@ -450,7 +357,6 @@ def train(cfg, tokenizer, train_texts, train_gold, dev_texts=None, dev_gold=None
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / max(1, warm)) * max(0.0, (steps - s) / max(1, steps - warm)) if s >= warm
         else (s + 1) / max(1, warm))
-    # Down-weight "O" a little: entities are a small share of tokens.
     weight = torch.ones(len(TAGS)); weight[0] = cfg.get("o_weight", 1.0)
     weight = weight.to(device)
     best, best_state, hist = -1.0, None, []
@@ -511,7 +417,6 @@ def main(argv=None):
     ap.add_argument("--init_emb", help=".npy [vocab, emb] to initialise the token embedding (e.g. word2vec)")
     ap.add_argument("--seed", type=int)
     a = ap.parse_args(argv)
-    # Resolve paths up front: a long run on a remounted shared folder can lose its cwd.
     a.data, a.out = os.path.abspath(a.data), os.path.abspath(a.out)
     if a.tokenizer:
         a.tokenizer = os.path.abspath(a.tokenizer)
@@ -530,7 +435,6 @@ def main(argv=None):
         if a.encoder == "charbilstm":
             cfg["encoder_args"]["tokenizer_path"] = a.tokenizer
         if a.encoder == "phase1":
-            # Full fine-tuning: small LR for the pretrained encoder, larger for the new head.
             cfg.update(encoder_args={}, phase1_ckpt=os.path.abspath(a.phase1_ckpt),
                        phase1_code_dir=os.path.abspath(a.phase1_code_dir),
                        lr=1e-3, encoder_lr=5e-5, epochs=6, batch_size=8, o_weight=1.0)

@@ -6,7 +6,7 @@ decision has been removed (ILDC). Metric: Macro-F1.
 **Best submission: Codabench 0.7539**, `kd_unilm6`: a 6-layer (67M) unilm student distilled from the full fine-tuned unilm.
 
 Code: `../finetune/p4_cjpe.py` (`prep`, `train`, `ensemble`, `score`, `validate`); notebook
-`../finetune/kaggle_p4/CS781-CP-Phase4-Darsh-Kedia-250311.ipynb` (`build_p4_notebook.py`). The round-2 notebook
+`../finetune/kaggle_p4/CS781-CP-Phase4-Darsh-Kedia-250311.ipynb`. The round-2 notebook
 was built but never run.
 
 ## Data hygiene (data finding)

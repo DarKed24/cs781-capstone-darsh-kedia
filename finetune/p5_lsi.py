@@ -1,46 +1,11 @@
 #!/usr/bin/env python3
 """CS781 Capstone, Phase 5: Legal Statute Identification, LSI (Darsh Kedia, 250311).
 
-Multi-label: each document (Indian court judgment, statute mentions masked as <SECTION>/<ACT>)
-gets one or more of 100 statute ids (0..99). Metric: Macro-F1 over the 100 labels
-(evaluate_phase5.py; Micro-F1 and subset accuracy are tie-breakers).
-
-Data (measured 2026-10-19): train 42,750 docs, dev 10,181, test 13,019; no id overlap between
-splits; a few hundred exact-duplicate texts (mostly one-line orders such as "ORDER <ENTITY>, J.").
-Every doc has >= 1 label, mean 3.7 (train) / 3.9 (dev); the rarest label still has 272 train /
-68 dev docs. Median 0.8k tokens, mean 2.0k, 90th percentile 4.4k (Phase 1 tokenizer).
-Hygiene: train docs whose exact text also appears in dev are dropped (keeps dev honest); train is
-de-duplicated by text; dev is never trained on unless --full.
-
-Model
-  * The document is cut into chunks of `chunk_len` tokens: the first `head_chunks` chunks plus
-    the last `tail_chunks` chunks (not overlapping the head). Default 3 + 1 x 512 = up to 2,048
-    tokens, which is the whole document for ~70% of docs.
-  * Each chunk -> Phase 1 backbone (any arch, any technique from ft_core) -> mean pooling ->
-    + learned chunk-position embedding -> BiGRU over chunks -> [attention pooling ; max pooling]
-    -> linear layer with 100 logits (binary relevance, one sigmoid per statute).
-  * Loss: BCE with per-label pos_weight = sqrt(#neg / #pos) (helps rare labels for Macro-F1).
-  * Decision rule: a global or per-label probability threshold tuned on dev (per-label is used
-    only when it wins on a cross-half check, see `choose_thresholds`), and every document gets at
-    least its top-scoring label (every gold set is non-empty).
-  * Distillation (multi-label): the student loss is (1 - a) * BCE + a * T^2 * BCE(sigmoid(s/T),
-    sigmoid(t/T)) on teacher logits saved with --save_train_logits [Hinton et al. 2015].
-
-CLI
-  prep      python p5_lsi.py prep --data DIR --tokenizer tok.json --cache CACHE.pt
-  train     python p5_lsi.py train --data DIR --cache CACHE.pt --out RUN --ckpt model_best.pt
-            [--method full|lora|lorma_plus|lorma_pi|norms|head] [--epochs 2] [--docs_per_epoch 16000]
-            [--keep_layers 6 --teacher RUN_T --kd_alpha 0.5 --kd_T 2] [--full] [--save_train_logits N]
-            Writes RUN/{prediction.json, submission.zip, test_prob.pt, dev_prob.pt, run.json}.
-  ensemble  python p5_lsi.py ensemble --data DIR --out OUT RUN1 RUN2 ...   (mean of probabilities)
-  score     python p5_lsi.py score --data DIR RUN_DIR_or_prediction.json   (dev Macro-F1)
-  validate  python p5_lsi.py validate --data DIR prediction.json
-  baseline  python p5_lsi.py baseline --data DIR --out OUT   TF-IDF + one-vs-rest logistic
-            regression. REFERENCE ONLY (not a Phase 1 model, so never submit it).
-
-References: Paul et al. 2022, LeSICiN (AAAI) and Vats et al. 2023 (ILSI / Indian LSI datasets);
-Chalkidis et al. 2019 (hierarchical encoders for long legal documents); Hinton et al. 2015 (KD);
-Hu et al. 2022 (LoRA); Bihany, Patel, Modi 2025 (LoRMA).
+References:
+  [1] Paul et al. 2022, LeSICiN; Vats et al. 2023, ILSI
+  [2] Chalkidis et al. 2019, hierarchical encoders for long legal documents
+  [3] Hinton et al. 2015, Knowledge Distillation
+  [4] Hu et al. 2022, LoRA; Bihany, Patel, Modi 2025, LoRMA
 """
 import argparse
 import glob
@@ -64,12 +29,9 @@ import ft_core as C
 
 PAD = 0
 NL = 100
-GRID = [round(0.02 * k, 2) for k in range(1, 48)]   # probability thresholds 0.02 .. 0.94
+GRID = [round(0.02 * k, 2) for k in range(1, 48)]
 
 
-# --------------------------------------------------------------------------------------
-# Data
-# --------------------------------------------------------------------------------------
 def find(data, name):
     for p in (os.path.join(data, name), os.path.join(data, "Train", name), os.path.join(data, "Test", name)):
         if os.path.exists(p):
@@ -85,7 +47,6 @@ def _labels(r):
 
 
 def load_raw(data, need_train=True):
-    """train (de-duplicated, dev texts removed), dev, test."""
     test = [{"id": str(r["id"]), "text": r["text"]} for r in json.load(open(find(data, "test.json"), encoding="utf-8"))]
     tids = {r["id"] for r in test}
     dev = [{"id": str(r["id"]), "text": r["text"], "labels": _labels(r)}
@@ -113,13 +74,11 @@ def clean_text(t):
 
 
 def prep(args):
-    """Tokenise all splits once. Keeps the first `keep_head` and last `keep_tail` tokens."""
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(args.tokenizer)
     data, info = load_raw(args.data, need_train=not args.no_train)
     out = {"info": info, "keep_head": args.keep_head, "keep_tail": args.keep_tail,
            "tokenizer": os.path.abspath(args.tokenizer), "keep_all": args.keep_all,
-           # tokens that carry the masked statute markers <SECTION> / <ACT> (for --select cue)
            "cue_ids": sorted({tok.token_to_id(t) for t in ("SECTION", "ACT") if tok.token_to_id(t) is not None})}
     t0 = time.time()
     for split, docs in data.items():
@@ -128,7 +87,7 @@ def prep(args):
             part = docs[k:k + 512]
             encs = tok.encode_batch([clean_text(d["text"]) for d in part], add_special_tokens=False)
             for d, e in zip(part, encs):
-                ids = e.ids or [1]   # unk for an empty doc
+                ids = e.ids or [1]
                 recs[d["id"]] = {"head": torch.tensor(ids[:args.keep_head], dtype=torch.int16),
                                  "tail": torch.tensor(ids[-args.keep_tail:], dtype=torch.int16),
                                  "n_tok": len(ids), "labels": d.get("labels")}
@@ -143,9 +102,6 @@ def prep(args):
 
 
 def chunks_of(rec, chunk_len, head_chunks, tail_chunks):
-    """First `head_chunks` chunks, then up to `tail_chunks` chunks aligned to the document end
-    that do not overlap the head. Positions: head chunk i -> i, tail chunks -> head_chunks + k
-    with k = 0 for the last chunk."""
     n_tok = rec["n_tok"]
     head = rec["head"].tolist()[:chunk_len * head_chunks]
     chunks = [head[i:i + chunk_len] for i in range(0, len(head), chunk_len)]
@@ -166,12 +122,6 @@ def chunks_of(rec, chunk_len, head_chunks, tail_chunks):
 
 
 def cue_chunks(rec, chunk_len, n, cue_ids):
-    """Evidence-guided context selection (--select cue): split the whole document into
-    consecutive chunks and keep the first chunk (parties, court, charge) plus the n - 1 chunks
-    with the most masked statute markers (<SECTION>, <ACT>); ties go to the earlier chunk.
-    Kept chunks stay in document order. Motivation (dev, 2026-10-25): for the 30% of docs longer
-    than 2,048 tokens, the fixed first-3 + last-1 window misses 32% of the statute markers, and
-    for 27% of those docs it misses most of them."""
     ids = rec["all"]
     chunks = [ids[k:k + chunk_len] for k in range(0, len(ids), chunk_len)]
     if len(chunks) <= n:
@@ -219,11 +169,7 @@ def collate(recs, ids, args, teacher=None):
     return out
 
 
-# --------------------------------------------------------------------------------------
-# Model
-# --------------------------------------------------------------------------------------
 class DocHead(nn.Module):
-    """Chunk vectors [N, H] (+ positions, owners) -> doc logits [B, NL]."""
 
     def __init__(self, H, max_pos, hidden=384, dropout=0.1):
         super().__init__()
@@ -276,17 +222,11 @@ def build(args):
 
 
 def kd_bce(student_logits, teacher_logits, T=2.0):
-    """Binary (per-label) distillation: BCE between tempered sigmoids, scaled by T^2."""
     t = torch.sigmoid(teacher_logits.float() / T)
     return F.binary_cross_entropy_with_logits(student_logits.float() / T, t) * T * T
 
 
-# --------------------------------------------------------------------------------------
-# Metrics, thresholds, output
-# --------------------------------------------------------------------------------------
 def f1_per_label(Y, P):
-    """Y, P: bool tensors [n, NL]. F1 per label; 0 when a label has no gold and no prediction
-    (sklearn zero_division=0, as evaluate_phase5.py)."""
     tp = (Y & P).sum(0).double()
     fp = (~Y & P).sum(0).double()
     fn = (Y & ~P).sum(0).double()
@@ -295,8 +235,6 @@ def f1_per_label(Y, P):
 
 
 def macro_f1(Y, P):
-    """f1_score(average='macro', zero_division=0) over all NL labels, as evaluate_phase5.py
-    (its label count is max gold id + 1 = 100 on dev)."""
     return float(f1_per_label(Y, P).mean())
 
 
@@ -307,7 +245,6 @@ def micro_f1(Y, P):
 
 
 def decide(prob, thr, min_one=True):
-    """prob [n, NL]; thr scalar or [NL] tensor. Adds the argmax label to docs with none."""
     P = prob > (thr if torch.is_tensor(thr) else float(thr))
     if min_one:
         empty = ~P.any(1)
@@ -321,7 +258,6 @@ def tune_global(Y, prob, min_one=True):
 
 
 def tune_per_label(Y, prob):
-    """Per-label threshold maximising that label's F1 (min_one is not applied while tuning)."""
     best = torch.full((NL,), 0.5)
     best_f = torch.full((NL,), -1.0)
     for t in GRID:
@@ -339,10 +275,6 @@ def dev_matrix(recs, prob_dict):
 
 
 def choose_thresholds(recs, prob_dict):
-    """Tunes a global and a per-label threshold. Their honest value is estimated by tuning on
-    one half of dev (fixed split by crc32(id)) and scoring on the other half, both ways. The
-    per-label rule is used only if it beats the global one there by > 0.003. Final thresholds
-    are re-tuned on all of dev."""
     ids, Y, prob = dev_matrix(recs, prob_dict)
     half = torch.tensor([zlib.crc32(i.encode()) % 2 for i in ids])
     cross = {"global": [], "per_label": []}
@@ -368,7 +300,6 @@ def choose_thresholds(recs, prob_dict):
 
 
 def quick_dev_f1(recs, prob_dict):
-    """Epoch selection: Macro-F1 at the best global threshold."""
     _, Y, prob = dev_matrix(recs, prob_dict)
     return macro_f1(Y, decide(prob, tune_global(Y, prob)))
 
@@ -402,19 +333,15 @@ def write_submission(pred, out_dir):
         z.write(pj, "prediction.json")
 
 
-# --------------------------------------------------------------------------------------
-# Train / predict
-# --------------------------------------------------------------------------------------
 def doc_tokens(rec, args):
     return min(rec["n_tok"], args.chunk_len * (args.head_chunks + args.tail_chunks))
 
 
 def batches_by_length(recs, ids, args, batch_docs):
-    """Inference batches, longest docs first, each holding ~batch_docs x max doc tokens."""
     budget = batch_docs * args.chunk_len * (args.head_chunks + args.tail_chunks)
     order = sorted(ids, key=lambda i: -doc_tokens(recs[i], args))
     out, cur = [], []
-    for i in order:   # descending, so the first doc of a batch is its longest
+    for i in order:
         if cur and (doc_tokens(recs[cur[0]], args) * (len(cur) + 1) > budget or len(cur) >= 64):
             out.append(cur)
             cur = []
@@ -425,8 +352,6 @@ def batches_by_length(recs, ids, args, batch_docs):
 
 
 def train_batches(recs, ids, args, rng):
-    """Length-bucketed batches with ~batch_docs * max_tokens tokens each: short docs are packed
-    more densely (most docs are far below the 2,048-token cap). Batch order is shuffled."""
     budget = args.batch_docs * args.chunk_len * (args.head_chunks + args.tail_chunks)
     order = sorted(ids, key=lambda i: (doc_tokens(recs[i], args), rng.random()))
     out, cur, cur_max = [], [], 0
@@ -463,7 +388,6 @@ def to_prob(logits):
 
 @torch.no_grad()
 def chunk_features(model, recs, ids, args, device, amp, log):
-    """Frozen backbone: chunk vectors per doc, computed once (method head)."""
     model.eval()
     feats, t0 = {}, time.time()
     bl = batches_by_length(recs, ids, args, args.eval_batch)
@@ -539,13 +463,12 @@ def train(args):
     sel_ids = random.Random(7).sample(dev_ids, min(args.dev_select_docs, len(dev_ids))) if args.dev_select_docs else dev_ids
     test_ids = [r["id"] for r in json.load(open(find(args.data, "test.json"), encoding="utf-8"))]
     assert set(test_ids) == set(te), "cache does not match test.json"
-    if args.limit_docs:   # smoke test: the zip is NOT a valid submission
+    if args.limit_docs:
         test_ids = test_ids[:args.limit_docs]
     model, peft = build(args)
     model.to(device)
     n_tr = C.count_trainable(model)
     per_epoch = min(args.docs_per_epoch or len(pool), len(pool))
-    # per-label positive weights sqrt(neg/pos), clipped
     pos_cnt = torch.zeros(NL)
     for i in pool:
         pos_cnt += multi_hot(tr[i]["labels"])
@@ -705,9 +628,6 @@ def ensemble(args):
     print(json.dumps({k: v for k, v in info.items() if k != "threshold"}))
 
 
-# --------------------------------------------------------------------------------------
-# TF-IDF reference baseline (CPU; NOT a Phase 1 model, reference only)
-# --------------------------------------------------------------------------------------
 def baseline(args):
     import numpy as np
     from sklearn.feature_extraction.text import TfidfVectorizer

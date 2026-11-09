@@ -1,14 +1,10 @@
-"""Phase 2 (L-NER) utilities: data loading, char-offset <-> token BIO alignment,
-strict span scoring, prediction.json validation and Codabench zip packaging.
+"""Phase 2 (L-NER) utilities: data loading, char-offset <-> BIO alignment, scoring, validation.
 
-Pure Python (no torch / transformers needed) so it works with any tokenizer:
-a tokenizer only has to give (start_char, end_char) offsets for each token.
-
-CLI:
-  python lner_utils.py roundtrip TEXT.json GOLD.json   # ceiling F1 of word-level BIO alignment
-  python lner_utils.py score GOLD.json PRED.json        # strict macro P/R/F1 (local held-out fold)
+Usage:
+  python lner_utils.py roundtrip TEXT.json GOLD.json
+  python lner_utils.py score GOLD.json PRED.json
   python lner_utils.py validate TEST_TEXT.json PRED.json
-  python lner_utils.py zip PRED.json [OUT.zip]          # prediction.json at zip root
+  python lner_utils.py zip PRED.json [OUT.zip]
 """
 
 import json
@@ -21,12 +17,7 @@ LABELS = ["APP", "RESP", "A.COUNSEL", "R.COUNSEL", "JUDGE", "WIT",
           "AUTH", "COURT", "STAT", "PREC", "DATE", "CASENO"]
 
 
-# ----------------------------------------------------------------------------
-# Loading
-# ----------------------------------------------------------------------------
-
 def load_texts(path):
-    """{doc_id: text}. Also accepts a list of {"id", "text"} records."""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, list):
@@ -35,7 +26,6 @@ def load_texts(path):
 
 
 def _norm_span(e):
-    """Accept [s, e, label(, text)] or {"start","end","label"} style entries."""
     if isinstance(e, dict):
         s = e.get("start", e.get("start_char", e.get("begin")))
         t = e.get("end", e.get("end_char"))
@@ -45,10 +35,9 @@ def _norm_span(e):
 
 
 def load_spans(path):
-    """{doc_id: [(start, end, label), ...]} from a gold or prediction file."""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
-    if isinstance(data, list):  # list of {"id", "entities"/"spans"/"pred"}
+    if isinstance(data, list):
         data = {str(d["id"]): d.get("entities", d.get("spans", d.get("pred", []))) for d in data}
     return {str(k): [_norm_span(e) for e in v] for k, v in data.items()}
 
@@ -58,28 +47,14 @@ def load_labels(path):
         return [l.strip() for l in f if l.strip()]
 
 
-# ----------------------------------------------------------------------------
-# Pre-tokenization with character offsets
-# ----------------------------------------------------------------------------
-
-# Words, numbers and single punctuation marks each become a token. Splitting
-# punctuation off matters: gold spans like "Section 302" or "(2003) 5 SCC 123"
-# often end right before a comma/full stop.
 _WORD_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 
 
 def word_offsets(text):
-    """[(start, end), ...] for words/punctuation in text (whitespace dropped)."""
     return [(m.start(), m.end()) for m in _WORD_RE.finditer(text)]
 
 
 def subword_offsets(text, encode_word):
-    """Offsets for a subword tokenizer that works word by word.
-
-    encode_word(word) -> list of token strings whose concatenated *character*
-    lengths equal len(word) (true for most BPE/WordPiece once markers such as
-    '##' or '</w>' are stripped). Returns [(tok, start, end), ...].
-    """
     out = []
     for s, e in word_offsets(text):
         pos = s
@@ -92,16 +67,7 @@ def subword_offsets(text, encode_word):
     return out
 
 
-# ----------------------------------------------------------------------------
-# Spans <-> BIO tags
-# ----------------------------------------------------------------------------
-
 def spans_to_bio(offsets, spans):
-    """Tag each token B-X / I-X / O. A token belongs to a span if it overlaps it.
-
-    Returns (tags, misaligned) where misaligned lists spans whose edges do not
-    fall on token boundaries; those can never be predicted exactly from tags.
-    """
     tags = ["O"] * len(offsets)
     misaligned = []
     starts = {s for s, _ in offsets}
@@ -113,7 +79,7 @@ def spans_to_bio(offsets, spans):
         for i, (ts, te) in enumerate(offsets):
             if te <= s or ts >= e:
                 continue
-            if tags[i] != "O":  # overlapping gold spans: keep the earlier one
+            if tags[i] != "O":
                 continue
             tags[i] = ("B-" if first else "I-") + lab
             first = False
@@ -121,7 +87,6 @@ def spans_to_bio(offsets, spans):
 
 
 def bio_to_spans(offsets, tags):
-    """Decode BIO tags to [(start, end, label)]. A stray I-X starts a new span."""
     spans = []
     cur = None
     for (ts, te), tag in zip(offsets, tags):
@@ -142,9 +107,6 @@ def bio_to_spans(offsets, tags):
 
 
 def windows(n_tokens, max_len, stride):
-    """Sliding windows [(lo, hi)] covering n_tokens; overlap = max_len - stride.
-    When predicting, keep each token's label from the window where it is
-    furthest from an edge (or average logits over windows)."""
     if n_tokens <= max_len:
         return [(0, n_tokens)]
     out, lo = [], 0
@@ -156,14 +118,7 @@ def windows(n_tokens, max_len, stride):
         lo += stride
 
 
-# ----------------------------------------------------------------------------
-# Strict scoring
-# ----------------------------------------------------------------------------
-
 def strict_scores(gold, pred, labels=LABELS):
-    """Strict match on (doc, start, end, label). Macro = mean over `labels` of
-    per-label P/R/F1 over all 12 labels, matching the official
-    evaluate_phase2.py: a label with no gold and no predictions scores 0."""
     tp, fp, fn = defaultdict(int), defaultdict(int), defaultdict(int)
     for doc in set(gold) | set(pred):
         g = set(gold.get(doc, []))
@@ -182,12 +137,7 @@ def strict_scores(gold, pred, labels=LABELS):
     return macro, per
 
 
-# ----------------------------------------------------------------------------
-# Validation and packaging
-# ----------------------------------------------------------------------------
-
 def validate(pred_raw, texts, labels=LABELS):
-    """Return a list of problems with a prediction dict (empty list = OK)."""
     errs = []
     if not isinstance(pred_raw, dict):
         return ["top level must be an object {doc_id: [[start, end, label], ...]}"]
@@ -221,14 +171,12 @@ def validate(pred_raw, texts, labels=LABELS):
 
 
 def make_zip(pred_path, out_path="submission.zip"):
-    """Write prediction.json directly at the root of the archive."""
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(pred_path, arcname="prediction.json")
     return out_path
 
 
 def write_predictions(pred, path="prediction.json", texts=None):
-    """pred: {doc_id: [(s, e, label)]}. Writes [[s, e, label]] lists (sorted)."""
     out = {d: [[int(s), int(e), l] for s, e, l in sorted(set(v))] for d, v in pred.items()}
     if texts is not None:
         for d in texts:
@@ -240,10 +188,6 @@ def write_predictions(pred, path="prediction.json", texts=None):
         json.dump(out, f, ensure_ascii=False)
     return path
 
-
-# ----------------------------------------------------------------------------
-# CLI
-# ----------------------------------------------------------------------------
 
 def _print_scores(macro, per):
     print(f"{'label':<10} {'P':>6} {'R':>6} {'F1':>6} {'tp':>6} {'fp':>6} {'fn':>6}")

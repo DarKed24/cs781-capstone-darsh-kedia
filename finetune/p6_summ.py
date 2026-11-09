@@ -1,30 +1,12 @@
 #!/usr/bin/env python3
-"""CS781 Phase 6: abstractive summarisation with the Phase 1 LMs (Darsh Kedia, 250311).
-
-Decoder-only formulation (gpt, unilm in causal mode 0, retnet): one 1024-token window
-    [source: SRC_LEN tokens] <sep> [summary: up to 1024 - SRC_LEN - 1 tokens]
-loss only on the summary tokens, greedy decoding with no-repeat-4-gram and a repetition penalty.
-
-Original idea (ablated): EXTRACT-THEN-GENERATE. Judgments have a median of ~3.1k words, the window
-holds ~450 source words, so plain head truncation feeds the model only the opening (cause title,
-counsel, procedural history). Instead a supervised extractive sentence scorer (p6_extract.Scorer,
-trained on train.json with reference-overlap targets) picks the ~450 most summary-like words, in
-document order, as the source. `--src head` (header-skipped lead) vs `--src ext` is the ablation.
-Second design choice: the official scorer runs BERTScore (roberta-large, 512-token cap), so only
-the first ~400 words of a summary count; the summary budget is therefore ~350-400 words.
-
-Encdec is not used here: its decoder holds only 256 tokens (~200 words).
-
-  python p6_summ.py prep  --data DIR --tokenizer tok.json --cache c.pt
-  python p6_summ.py train --cache c.pt --ckpt model_best.pt --code_dir . --out OUTDIR --method full|lora|lorma_plus ...
-"""
+"""CS781 Phase 6: abstractive summarisation with the Phase 1 LMs (Darsh Kedia, 250311)."""
 import argparse, json, math, os, random, sys, time, zipfile
 import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 SRC_LEN = 576
-TGT_LEN = 1024 - SRC_LEN - 1     # 447 tokens, ~360 words
+TGT_LEN = 1024 - SRC_LEN - 1
 SRC_WORDS = 470
 
 
@@ -147,7 +129,7 @@ def train(a):
                 if amp.scaler: amp.scaler.step(opt); amp.scaler.update()
                 else: opt.step()
                 opt.zero_grad(set_to_none=True); sched.step(); step += 1
-                if step == 20:   # time check: shrink the schedule so training ends within budget
+                if step == 20:
                     per = (time.time() - t0) / 20
                     fit_steps = int(budget / per)
                     if fit_steps < total:

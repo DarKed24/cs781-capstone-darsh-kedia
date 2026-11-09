@@ -39,4 +39,4 @@ character-offset spans per document. Metric: strict span Macro-F1 over the 12 la
 | 11 | ens4_mixed | 10 + model 6 | 0.4390 |
 | 12 | unilm_full | Phase 1 unilm (200M tokens) fine-tuned, 4 epochs, fold1+2 | **0.5189** |
 
-Local fold2 (train on fold1) overestimated Codabench by ~0.04-0.05 for the BiLSTMs. `NOTES.md` is the full work log.
+Local fold2 (train on fold1) overestimated Codabench by ~0.04-0.05 for the BiLSTMs.

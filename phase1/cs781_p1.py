@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
 """CS781 Capstone, Phase 1: legal language model pretraining from scratch.
 
-Darsh Kedia (250311). One module shared by all four Phase 1 architectures:
-
-  gpt     Decoder-only Transformer (pre-norm, RoPE, RMSNorm, SwiGLU, tied embeddings)
-  encdec  Encoder-decoder Transformer, trained on a 50/50 mix of prefix-LM continuation
-          and T5 span corruption
-  unilm   Hybrid encoder: one shared Transformer trained with both causal-LM and
-          bidirectional masked-LM objectives (UniLM style), with mode embeddings
-  retnet  Retentive Network: softmax-free multi-scale retention with a parallel form for
-          training and an O(1)-per-token recurrent form for generation
-
-Stages (CLI):  python cs781_p1.py {prepare|train|generate|pseudo_eval} --config run.json
-Multi-GPU:     torchrun --standalone --nproc_per_node=2 cs781_p1.py train --config run.json
-
-References (cite in the report as well):
+References:
   [1] Vaswani et al. 2017, Attention Is All You Need.
   [2] Radford et al. 2019, GPT-2 (init scheme, pre-norm decoder).
   [3] Su et al. 2021, RoFormer: rotary position embeddings (RoPE).
@@ -41,9 +28,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# --------------------------------------------------------------------------------------
-# Special tokens (ids are fixed by their order here; the Phase 2-7 code relies on them)
-# --------------------------------------------------------------------------------------
 N_SENTINELS = 64
 SPECIAL_TOKENS = ["<pad>", "<unk>", "<s>", "</s>", "<mask>", "<sep>"] + [
     f"<extra_id_{i}>" for i in range(N_SENTINELS)]
@@ -52,23 +36,20 @@ SENTINEL0 = 6
 N_SPECIAL = len(SPECIAL_TOKENS)
 
 
-# --------------------------------------------------------------------------------------
-# Configuration
-# --------------------------------------------------------------------------------------
 @dataclass
 class ModelConfig:
-    arch: str = "gpt"            # gpt | encdec | unilm | retnet
+    arch: str = "gpt"
     vocab_size: int = 32000
     d_model: int = 768
-    n_layer: int = 12            # gpt / unilm / retnet
+    n_layer: int = 12
     n_head: int = 12
     d_ff: int = 2048
     max_len: int = 1024
     dropout: float = 0.0
     rope_base: float = 10000.0
-    n_enc_layer: int = 6         # encdec
+    n_enc_layer: int = 6
     n_dec_layer: int = 6
-    enc_len: int = 768           # encdec: encoder context, decoder predicts max_len - enc_len
+    enc_len: int = 768
     grad_ckpt: bool = False
 
     @property
@@ -76,7 +57,6 @@ class ModelConfig:
         return self.max_len - self.enc_len
 
 
-# Full-size presets (~110-125M parameters each with a 32k vocabulary).
 PRESETS = {
     "gpt": dict(arch="gpt", d_model=768, n_layer=12, n_head=12, d_ff=2048),
     "encdec": dict(arch="encdec", d_model=768, n_enc_layer=6, n_dec_layer=6, n_head=12, d_ff=2048),
@@ -100,23 +80,20 @@ class RunConfig:
     seed: int = 42
     smoke: bool = False
     out_dir: str = "/kaggle/working/cs781_phase1"
-    data_dir: str = "/kaggle/working/cs781_phase1/data"   # tokenizer.json + token bins
-    # ---- data source ----
+    data_dir: str = "/kaggle/working/cs781_phase1/data"
     hf_repo: str = "Exploration-Lab/CS-781-Capstone"
-    local_data_dir: str = ""     # if set, read the source files from here instead of HF
+    local_data_dir: str = ""
     sources: dict = field(default_factory=lambda: dict(PHASE1_SOURCES))
     test_file: str = "Phase_1_Pretraining/Test/test.json"
     mix: dict = field(default_factory=lambda: {
         "supreme_court": 0.35, "high_courts": 0.35, "tribunals": 0.15, "acts": 0.15})
-    prepare_train_tokens: int = 420_000_000   # written once, shared by all four runs
+    prepare_train_tokens: int = 420_000_000
     val_tokens: int = 4_000_000
-    val_every_doc: int = 100     # every 100th document of each source goes to validation
-    n_pseudo_test: int = 200     # held-out 512-word prompt / 128-word reference pairs
+    val_every_doc: int = 100
+    n_pseudo_test: int = 200
     tokenizer_vocab: int = 32000
     tokenizer_sample_chars: int = 250_000_000
-    # ---- model ----
-    model: dict = field(default_factory=dict)   # overrides on top of PRESETS[arch]
-    # ---- training ----
+    model: dict = field(default_factory=dict)
     train_tokens: int = 200_000_000
     seq_len: int = 1024
     micro_batch: int = 8
@@ -124,7 +101,7 @@ class RunConfig:
     lr: float = 6e-4
     min_lr_frac: float = 0.1
     warmup_steps: int = 100
-    extend_peak_frac: float = 0.5   # continued pretraining: re-warm to lr * this, then cosine again
+    extend_peak_frac: float = 0.5
     weight_decay: float = 0.1
     beta2: float = 0.95
     grad_clip: float = 1.0
@@ -132,12 +109,11 @@ class RunConfig:
     eval_every: int = 200
     eval_batches: int = 20
     save_every: int = 100
-    max_hours: float = 11.0      # stop cleanly (and checkpoint) before Kaggle's 12h limit
-    resume_from: str = ""        # path to a last.pt from a previous session (else out_dir/run)
+    max_hours: float = 11.0
+    resume_from: str = ""
     compile: bool = False
-    hf_push_repo: str = ""       # optional private HF model repo for checkpoints
-    # ---- generation ----
-    gen_checkpoint: str = "best"   # best | final | path to a .pt
+    hf_push_repo: str = ""
+    gen_checkpoint: str = "best"
     gen_max_new_tokens: int = 224
     gen_target_words: int = 128
     gen_batch: int = 32
@@ -146,10 +122,9 @@ class RunConfig:
     top_p: float = 0.9
     repetition_penalty: float = 1.1
     no_repeat_ngram: int = 4
-    max_test_examples: int = 0   # 0 = all
+    max_test_examples: int = 0
 
     def apply_smoke(self):
-        """Tiny everything, so the whole pipeline runs in minutes (CPU or GPU)."""
         self.model = {**SMOKE_MODEL, **self.model}
         self.seq_len = 128
         self.prepare_train_tokens = min(self.prepare_train_tokens, 2_000_000)
@@ -204,10 +179,6 @@ def seed_everything(seed):
     torch.manual_seed(seed)
 
 
-# --------------------------------------------------------------------------------------
-# Reading the corpus (streams JSON arrays, JSON objects and JSON Lines without loading
-# whole multi-GB files into memory)
-# --------------------------------------------------------------------------------------
 def record_text(rec):
     if isinstance(rec, str):
         return rec
@@ -220,8 +191,6 @@ def record_text(rec):
 
 
 def iter_json_records(f):
-    """Yields (key_or_index, record) from a binary file object holding a JSON array,
-    a JSON object {id: record} or JSON Lines."""
     import ijson
     head = f.read(1 << 16)
     f.seek(0)
@@ -250,7 +219,6 @@ def iter_json_records(f):
 
 
 def open_source(cfg, rel_path):
-    """Opens a dataset file either from local_data_dir or straight from the HF Hub."""
     if cfg.local_data_dir:
         return open(os.path.join(cfg.local_data_dir, rel_path), "rb")
     from huggingface_hub import HfFileSystem
@@ -271,9 +239,6 @@ def load_json_file(cfg, rel_path):
         return json.load(f)
 
 
-# --------------------------------------------------------------------------------------
-# Tokenizer: byte-level BPE trained on the Phase 1 corpus (own vocabulary, 32k)
-# --------------------------------------------------------------------------------------
 def train_tokenizer(texts, vocab_size, out_path):
     from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders, processors
     tok = Tokenizer(models.BPE())
@@ -295,9 +260,6 @@ def load_tokenizer(path):
     return Tokenizer.from_file(path)
 
 
-# --------------------------------------------------------------------------------------
-# Stage 1: prepare (tokenizer + uint16 token bins + held-out pseudo-test set)
-# --------------------------------------------------------------------------------------
 def prepare(cfg):
     os.makedirs(cfg.data_dir, exist_ok=True)
     tok_path = os.path.join(cfg.data_dir, "tokenizer.json")
@@ -311,7 +273,7 @@ def prepare(cfg):
                 budget, seen = int(cfg.tokenizer_sample_chars * frac), 0
                 for idx, (_, text) in enumerate(iter_source_docs(cfg, cfg.sources[src])):
                     if idx % cfg.val_every_doc == 0:
-                        continue   # never fit the tokenizer on validation documents
+                        continue
                     yield text
                     seen += len(text)
                     if seen >= budget:
@@ -392,7 +354,6 @@ def prepare(cfg):
 
 
 class TokenData:
-    """Random fixed-length windows from the uint16 bins (memory-mapped)."""
 
     def __init__(self, data_dir, split):
         if split == "train":
@@ -418,9 +379,6 @@ class TokenData:
         return torch.from_numpy(out)
 
 
-# --------------------------------------------------------------------------------------
-# Building blocks
-# --------------------------------------------------------------------------------------
 class RMSNorm(nn.Module):
     def __init__(self, d, eps=1e-6):
         super().__init__()
@@ -446,7 +404,6 @@ class SwiGLU(nn.Module):
 
 
 def rope_tables(pos, head_dim, base):
-    """pos: (B, T) long -> cos, sin of shape (B, 1, T, head_dim/2)."""
     inv = 1.0 / (base ** (torch.arange(0, head_dim, 2, device=pos.device).float() / head_dim))
     f = pos.float()[..., None] * inv
     return f.cos()[:, None], f.sin()[:, None]
@@ -459,7 +416,6 @@ def apply_rope(x, cos, sin):
 
 
 class Attention(nn.Module):
-    """Multi-head softmax attention (self or cross) with an optional KV cache."""
 
     def __init__(self, d, n_head, dropout=0.0, cross=False):
         super().__init__()
@@ -531,7 +487,6 @@ def run_blocks(blocks, x, grad_ckpt, *args, caches=None, **kw):
 
 
 def init_weights(model, n_residual_layers):
-    """GPT-2 style init: N(0, 0.02), output projections scaled by 1/sqrt(2L) [2]."""
     for name, p in model.named_parameters():
         if p.dim() >= 2:
             std = 0.02
@@ -561,9 +516,6 @@ def ce(logits, labels, per_token=False):
     return loss.view(labels.shape) if per_token else loss
 
 
-# --------------------------------------------------------------------------------------
-# Architecture A (gpt) and C (unilm): shared Transformer stack
-# --------------------------------------------------------------------------------------
 class DecoderLM(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
@@ -574,16 +526,13 @@ class DecoderLM(nn.Module):
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.unilm = cfg.arch == "unilm"
         if self.unilm:
-            # mode 0 = causal (left-to-right) LM, mode 1 = bidirectional (MLM / encoder use)
             self.mode_emb = nn.Embedding(2, cfg.d_model)
             self.mlm_transform = nn.Sequential(nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
                                                RMSNorm(cfg.d_model))
         init_weights(self, cfg.n_layer)
-        self.lm_head.weight = self.emb.weight   # tied
+        self.lm_head.weight = self.emb.weight
 
     def hidden(self, ids, pos=None, mask=None, causal=True, mode=0, caches=None):
-        """Final hidden states. Phase 2-7 use this as the feature extractor
-        (unilm: mode=1, causal=False gives bidirectional features)."""
         B, T = ids.shape
         x = self.emb(ids)
         if self.unilm:
@@ -621,9 +570,6 @@ class DecoderLM(nn.Module):
         return self.lm_head(h[:, -1]), st
 
 
-# --------------------------------------------------------------------------------------
-# Architecture B (encdec): encoder-decoder Transformer
-# --------------------------------------------------------------------------------------
 class EncDecLM(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
@@ -641,7 +587,6 @@ class EncDecLM(nn.Module):
         return rope_tables(pos, self.cfg.d_model // self.cfg.n_head, self.cfg.rope_base)
 
     def encode(self, ids, valid=None):
-        """Bidirectional encoder states (Phase 2-7 feature extractor)."""
         B, S = ids.shape
         if valid is None or bool(valid.all()):
             pos, mask = torch.arange(S, device=ids.device)[None].expand(B, S), None
@@ -680,9 +625,6 @@ class EncDecLM(nn.Module):
         return logits[:, -1], st
 
 
-# --------------------------------------------------------------------------------------
-# Architecture D (retnet): Retentive Network [9]
-# --------------------------------------------------------------------------------------
 class Retention(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -694,7 +636,6 @@ class Retention(nn.Module):
         self.wg = nn.Linear(d, d, bias=False)
         self.wo = nn.Linear(d, d, bias=False)
         self.gn_weight = nn.Parameter(torch.ones(d))
-        # multi-scale decay, gamma_h = 1 - 2^(-5-h) as in RetNet
         self.register_buffer("log_gamma", torch.log(1 - 2.0 ** (-5.0 - torch.arange(H).float())),
                              persistent=False)
         self._mask_cache = {}
@@ -718,10 +659,6 @@ class Retention(nn.Module):
         return q, k * self.hd ** -0.5, v
 
     def _out(self, x, o):
-        # per-head normalisation (GroupNorm with one group per head). It is invariant to a
-        # positive per-row scale, which is what makes the parallel form (normalised decay) and
-        # the recurrent form (unnormalised state) agree. Dividing by the detached row max first
-        # keeps the eps from breaking that invariance when activations are tiny.
         B, T = x.shape[:2]
         o = o.float()
         o = o / o.detach().abs().amax(-1, keepdim=True).clamp(min=1e-20)
@@ -831,11 +768,7 @@ def count_params(model):
     return n
 
 
-# --------------------------------------------------------------------------------------
-# Objectives: turning raw token windows into per-architecture batches
-# --------------------------------------------------------------------------------------
 def random_spans_mask(length, density, mean_span, rng):
-    """T5 random_spans_noise_mask [6]: boolean mask with ~density of tokens in spans."""
     num_noise = max(1, int(round(length * density)))
     num_spans = max(1, min(N_SENTINELS - 1, int(round(num_noise / mean_span))))
     num_nonnoise = length - num_noise
@@ -854,7 +787,6 @@ def random_spans_mask(length, density, mean_span, rng):
 
 
 def make_batch(arch, raw, rng, mcfg, train=True, vocab_size=None):
-    """raw: (B, max_len + 1) token windows. Returns (kwargs for model.forward, tag)."""
     T = mcfg.max_len
     if arch in ("gpt", "retnet"):
         return {"input_ids": raw[:, :T], "labels": raw[:, 1:T + 1]}, "clm"
@@ -874,7 +806,7 @@ def make_batch(arch, raw, rng, mcfg, train=True, vocab_size=None):
     if arch == "encdec":
         E, Dl = mcfg.enc_len, mcfg.dec_len
         B = raw.size(0)
-        if not train or rng.random() < 0.5:   # prefix-LM continuation (= the Phase 1 task)
+        if not train or rng.random() < 0.5:
             labels = raw[:, E:E + Dl]
             dec_in = torch.cat([torch.full((B, 1), SEP, dtype=torch.long), labels[:, :-1]], 1)
             return {"enc_ids": raw[:, :E], "enc_valid": torch.ones(B, E, dtype=torch.bool),
@@ -907,9 +839,6 @@ def make_batch(arch, raw, rng, mcfg, train=True, vocab_size=None):
     raise ValueError(arch)
 
 
-# --------------------------------------------------------------------------------------
-# Stage 2: training (single GPU, DDP via torchrun, or CPU for smoke tests)
-# --------------------------------------------------------------------------------------
 def setup_device():
     world = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -931,8 +860,6 @@ def amp_dtype(device):
 
 
 def lr_at(step, total, cfg, start=0):
-    """Warm-up + cosine. start > 0 means a finished run is being extended: a fresh cycle from step
-    start that re-warms to lr * extend_peak_frac and decays to the same floor by the new total."""
     peak = cfg.lr if start == 0 else cfg.lr * cfg.extend_peak_frac
     floor = cfg.lr * cfg.min_lr_frac
     step, total = step - start, total - start
@@ -948,8 +875,6 @@ def to_dev(batch, device):
 
 @torch.no_grad()
 def evaluate(model, val, cfg, mcfg, device, dtype):
-    """Validation loss on fixed windows. `tail` = loss on the last dec_len tokens given the
-    preceding enc_len tokens, which is the one number comparable across all four archs."""
     model.eval()
     rng = np.random.default_rng(1234)
     tot = tail = 0.0
@@ -982,7 +907,6 @@ def export_weights(raw_model, mcfg, path, extra=None):
 
 
 def load_model(path, device="cpu"):
-    """Loads an exported model (model_final.pt / model_best.pt) or a training last.pt."""
     ck = torch.load(path, map_location="cpu", weights_only=False)
     mcfg = ModelConfig(**ck["model_config"])
     model = build_model(mcfg)
@@ -1001,7 +925,7 @@ def hf_push(cfg, files):
         for f in files:
             api.upload_file(path_or_fileobj=f, path_in_repo=f"{cfg.run_name}/{os.path.basename(f)}",
                             repo_id=cfg.hf_push_repo)
-    except Exception as e:   # never let an upload failure kill a training run
+    except Exception as e:
         log0(f"[hf_push] failed: {e}")
 
 
@@ -1048,7 +972,7 @@ def train(cfg):
         sched_start = ck.get("sched_start", 0)
         if ck.get("total_steps") and ck["total_steps"] != total_steps:
             if total_steps > ck["total_steps"] and step >= ck["total_steps"]:
-                sched_start = step   # extending a finished run: start a new lr cycle here
+                sched_start = step
                 log0(f"[train] extending finished run: {ck['total_steps']} -> {total_steps} steps, "
                      f"re-warming to lr {cfg.lr * cfg.extend_peak_frac:.2e}")
             else:
@@ -1058,7 +982,6 @@ def train(cfg):
     if cfg.compile:
         model = torch.compile(model)
     if world > 1:
-        # unilm's MLM head is unused on causal micro-batches, hence find_unused_parameters
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[device.index] if device.type == "cuda" else None,
             find_unused_parameters=cfg.arch == "unilm")
@@ -1179,11 +1102,7 @@ def plot_history(history, path, title):
     plt.close()
 
 
-# --------------------------------------------------------------------------------------
-# Stage 3: generation -> prediction.json -> submission zip
-# --------------------------------------------------------------------------------------
 class NgramBlocker:
-    """Incremental no-repeat-ngram constraint over the generated tokens."""
 
     def __init__(self, n, batch):
         self.n, self.seen, self.hist = n, [dict() for _ in range(batch)], [[] for _ in range(batch)]
@@ -1202,7 +1121,7 @@ class NgramBlocker:
 
 def sample_next(logits, generated, blocker, cfg, gen):
     logits = logits.float()
-    logits[:, :N_SPECIAL] = -float("inf")    # no EOS/PAD/sentinels inside a continuation
+    logits[:, :N_SPECIAL] = -float("inf")
     B = logits.size(0)
     if cfg.repetition_penalty != 1.0 and generated.numel():
         prev = torch.gather(logits, 1, generated)
@@ -1230,7 +1149,6 @@ def sample_next(logits, generated, blocker, cfg, gen):
 
 @torch.no_grad()
 def generate_continuations(model, mcfg, tok, prompts, cfg, device, dtype=None, seed=42):
-    """prompts: list of str -> list of str (first gen_target_words words of the continuation)."""
     keep = mcfg.enc_len if mcfg.arch == "encdec" else max(mcfg.max_len - cfg.gen_max_new_tokens, mcfg.max_len // 2)
     encs = [e.ids[-keep:] for e in tok.encode_batch(prompts)]
     order = sorted(range(len(prompts)), key=lambda i: len(encs[i]))
@@ -1302,7 +1220,6 @@ def generate_stage(cfg, prompts_dict=None, out_name="prediction.json", zip_name=
     return preds
 
 
-# Local metrics mirroring evaluate_phase1.py (ROUGE-L F1 and corpus BLEU-4 on words).
 def _lcs(a, b):
     prev = [0] * (len(b) + 1)
     for x in a:
@@ -1343,7 +1260,6 @@ def bleu4(preds, refs):
 
 
 def pseudo_eval(cfg, use_bertscore=False):
-    """Scores the model on held-out validation documents (512-word prompt, 128-word ref)."""
     with open(os.path.join(cfg.data_dir, "pseudo_test.json")) as f:
         prompts = json.load(f)
     with open(os.path.join(cfg.data_dir, "pseudo_truth.json")) as f:
@@ -1357,7 +1273,7 @@ def pseudo_eval(cfg, use_bertscore=False):
            "rougeL_f1": float(np.mean([rouge_l(preds[i]["text"], truth[i]["text"]) for i in ids])),
            "bleu4": bleu4([preds[i]["text"] for i in ids], [truth[i]["text"] for i in ids])}
     if use_bertscore:
-        import bert_score   # evaluation-only metric model, same as the official scorer
+        import bert_score
         _, _, f1 = bert_score.score([preds[i]["text"] for i in ids], [truth[i]["text"] for i in ids], lang="en")
         res["bertscore_f1"] = float(f1.mean())
     with open(os.path.join(cfg.run_dir, "pseudo_eval.json"), "w") as f:

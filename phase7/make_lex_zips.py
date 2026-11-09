@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Builds the CPU lexical Phase 7 submissions (an ablation ladder) and scores each config on dev.
-
-  python make_lex_zips.py DATA_DIR OUT_DIR [name ...]
-Dev uses the train labels for the citation prior; test uses train+dev labels.
-"""
+"""Builds the CPU lexical Phase 7 submissions (an ablation ladder) and scores each config on dev."""
 import json, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "finetune"))
 import p7_lex as L
 
-T = dict(k3=1000, k1=6.0, b=1.0, max_df=0.3)          # tuned BM25 (on train, checked on dev)
+T = dict(k3=1000, k1=6.0, b=1.0, max_df=0.3)
 CONFIGS = {
     "bm25_plain":          {},
     "bm25_tuned":          T,

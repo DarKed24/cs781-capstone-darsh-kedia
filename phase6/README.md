@@ -12,7 +12,6 @@ split: a fixed 150-document held-out slice of train (seed 781) is used for every
 - `make_ladder.py`, `make_fusion.py`: build the extractive and rank-fusion submissions (CPU, ~10 min). Set `CS781_ROOT` to the folder holding `data/`.
 - `eval_holdout.py`, `eval_fusion.py`: BERTScore/ROUGE on the held-out slice.
 - Generators: `../finetune/p6_summ.py`, notebook `../finetune/kaggle_p6/CS781-CP-Phase6-Darsh-Kedia-250311.ipynb`.
-- `NOTES.md`: full analysis.
 
 ## Key design facts
 - The scorer truncates at 512 roberta tokens, so only the first ~400 words of a summary affect BERTScore: all budgets are ~400 words.

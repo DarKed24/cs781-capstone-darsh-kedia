@@ -1,17 +1,13 @@
 """Phase 6 CPU extractive summarisers (safety ladder + supervised sentence scorer).
 
-Methods: lead-W, header-skipping lead, TextRank (Mihalcea & Tarau 2004) over TF-IDF
-cosine, TF-IDF centroid, and a supervised sentence scorer trained on train.json with
-ROUGE-style overlap targets (in the spirit of SummaRuNNer-style oracle labelling,
-Nallapati et al. 2017, but with a linear model on hashed n-grams + position).
-Key observation used throughout: the official scorer calls bert_score.score with
-lang='en' (roberta-large, max 512 tokens), so only the first ~400 words of a summary
-can affect BERTScore; length budgets and sentence order are chosen with that in mind.
+References:
+  [1] Mihalcea & Tarau 2004, TextRank
+  [2] Nallapati et al. 2017, SummaRuNNer
 """
 import json, re, sys, os, random, zipfile, math, argparse
 import numpy as np
 
-ROOT = os.environ.get('CS781_ROOT', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))  # folder that holds data/
+ROOT = os.environ.get('CS781_ROOT', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 TRAIN = f'{ROOT}/data/Phase_6_Summ/Train/train.json'
 TEST = f'{ROOT}/data/Phase_6_Summ/Test/test.json'
 OUT = f'{ROOT}/phase6/submissions'
@@ -35,8 +31,6 @@ def sentences(text):
 HEADER_CUES = re.compile(r'(judgment of the court was delivered by|delivered the judgment|^.{0,80}\bJ\s*\.\s*:|ORDER|J U D G M E N T|JUDGMENT)', re.I)
 
 def skip_header(sents):
-    """Drop leading metadata (case numbers, counsel lists) up to the first 'delivered by'/'J.:' cue
-    within the first 15 sentences; strip the cue prefix from that sentence."""
     for i, s in enumerate(sents[:15]):
         m = re.search(r'(delivered by|delivered the following judgment)\s*[^:]{0,60}:\s*', s, re.I) or re.search(r'\bJ\s*\.\s*:\s*', s)
         if m:
@@ -45,7 +39,6 @@ def skip_header(sents):
     return sents
 
 def take_budget(sents, idx, W):
-    """Take sentences in order of idx until W words; output in given order."""
     out, n = [], 0
     for i in idx:
         w = len(sents[i].split())
@@ -76,7 +69,6 @@ def textrank(doc, W, skip=True, centroid=False):
     keep = sorted(take_budget(s, order, W))
     return ' '.join(s[i] for i in keep)
 
-# ---------------- supervised sentence scorer ----------------
 def toks(t): return re.findall(r'[a-z0-9]+', t.lower())
 STOP = set('the of and to a in that is was be by for on as it with this which or an not are at from had has have were he his its any been under said such they their there no but shall also court'.split())
 
@@ -87,7 +79,7 @@ def sent_targets(sents, ref):
     y = []
     for s in sents:
         t = [w for w in toks(s) if w not in STOP]
-        y.append(sum(1 for w in t if w in rset) / (len(t) + 3))  # smoothed precision vs reference vocabulary
+        y.append(sum(1 for w in t if w in rset) / (len(t) + 3))
     return np.array(y)
 
 def sent_feats(sents, doc_vocab_tf=None):

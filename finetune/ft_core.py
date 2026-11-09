@@ -1,34 +1,11 @@
 #!/usr/bin/env python3
 """CS781 Capstone, Phases 2-7: shared fine-tuning toolkit (Darsh Kedia, 250311).
 
-Task-independent pieces that every phase reuses:
-
-  Backbone        any Phase 1 architecture (gpt, unilm, encdec, retnet) as a feature
-                  extractor  ids [B, T] (+ valid mask) -> hidden states [B, T, H].
-                  Optional layer dropping (`keep_layers`) builds a smaller student
-                  for knowledge distillation, initialised from the teacher's layers.
-  apply_peft      fine-tuning technique on a backbone:
-                    full        every weight trainable (classic fine-tuning)
-                    lora        additive low-rank update   W' = W + (a/r) B A          [1]
-                    lorma_plus  multiplicative update      W' = (I + (a/r) B A) W       [2]
-                    lorma_pi    multiplicative update      W' = pi(B A) W               [2]
-                    norms       only the normalisation gains are trained              [3]
-                    head        frozen backbone, only the task head is trained (probe)
-  kd_loss         Hinton-style distillation loss on softened distributions          [4]
-  Trainer bits    AMP dtype, parameter groups, warm-up + linear decay schedule,
-                  saving only the trainable weights.
-
-References (cite in the report):
-  [1] Hu et al. 2022, LoRA: Low-Rank Adaptation of Large Language Models.
-  [2] Bihany, Patel, Modi 2025, LoRMA: Low-Rank Multiplicative Adaptation for LLMs
-      (Findings of ACL 2025, arXiv 2506.07621). LoRMA_+ adds the identity to the
-      scaled low-rank product (additive rank inflation); LoRMA_pi cyclically shifts
-      the rows of B A (permutation rank inflation), initialised so pi(B A) = I.
-      Both re-order the computation: h = W x first, then the d x d transform.
-  [3] Zhao et al. 2024, Tuning LayerNorm in Attention (normalisation-only tuning);
-      Ben Zaken et al. 2022, BitFit (tiny-subset tuning).
-  [4] Hinton, Vinyals, Dean 2015, Distilling the Knowledge in a Neural Network;
-      Sanh et al. 2019, DistilBERT (student initialised from every other teacher layer).
+References:
+  [1] Hu et al. 2022, LoRA
+  [2] Bihany, Patel, Modi 2025, LoRMA (Findings of ACL 2025)
+  [3] Zhao et al. 2024, Tuning LayerNorm in Attention; Ben Zaken et al. 2022, BitFit
+  [4] Hinton, Vinyals, Dean 2015, Knowledge Distillation; Sanh et al. 2019, DistilBERT
 """
 import json
 import math
@@ -41,9 +18,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# --------------------------------------------------------------------------------------
-# Misc
-# --------------------------------------------------------------------------------------
 def set_seed(seed):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -51,7 +25,6 @@ def set_seed(seed):
 
 
 def device_and_amp():
-    """(device, autocast dtype or None). T4 (sm_75) has no fast bf16, so it gets fp16."""
     if not torch.cuda.is_available():
         return torch.device("cpu"), None
     dev = torch.device("cuda")
@@ -70,11 +43,7 @@ def checkpoint_arch(path):
     return ck["model_config"]["arch"]
 
 
-# --------------------------------------------------------------------------------------
-# Backbone: Phase 1 model -> hidden states
-# --------------------------------------------------------------------------------------
 def _spread(n_have, n_keep):
-    """Evenly spaced layer indices, always keeping the first and the last layer."""
     if n_keep >= n_have:
         return list(range(n_have))
     if n_keep == 1:
@@ -83,16 +52,6 @@ def _spread(n_have, n_keep):
 
 
 class Backbone(nn.Module):
-    """Feature extractor over a Phase 1 export (model_best.pt / model_final.pt).
-
-      gpt     DecoderLM.hidden, causal (bidir=True runs it without the causal mask)
-      unilm   DecoderLM.hidden with mode=1, causal=False (bidirectional, as pretrained by MLM)
-      encdec  EncDecLM.encode (bidirectional encoder; the decoder is dropped unless keep_decoder)
-      retnet  RetNetLM.hidden (causal decay retention)
-
-    Batches are right-padded with `valid` marking real tokens. Padding is masked for the
-    bidirectional archs and cannot reach real tokens in the causal ones.
-    """
 
     def __init__(self, ckpt, code_dir=None, keep_layers=None, bidir=False, grad_ckpt=False,
                  keep_decoder=False):
@@ -109,7 +68,7 @@ class Backbone(nn.Module):
         if self.arch == "encdec" and not keep_decoder:
             model.dec = nn.ModuleList()
         if self.arch == "unilm":
-            model.mlm_transform = nn.Identity()   # pretraining-only head
+            model.mlm_transform = nn.Identity()
         model.cfg.grad_ckpt = grad_ckpt
         self.model = model
         self.source_ckpt = os.path.abspath(ckpt)
@@ -130,11 +89,7 @@ class Backbone(nn.Module):
         raise ValueError(self.arch)
 
 
-# --------------------------------------------------------------------------------------
-# PEFT layers
-# --------------------------------------------------------------------------------------
 class LoRALinear(nn.Module):
-    """y = W x + (alpha/r) B A x, with B = 0 at init [1]."""
     adapter = True
 
     def __init__(self, base: nn.Linear, r=8, alpha=16, dropout=0.0):
@@ -157,7 +112,6 @@ _ROLL_IDX = {}
 
 
 def _roll_index(d, device):
-    """idx[i, j] = (j - i) mod d, so M.gather(1, idx) shifts row i of M right by i."""
     key = (d, str(device))
     if key not in _ROLL_IDX:
         a = torch.arange(d, device=device)
@@ -166,15 +120,6 @@ def _roll_index(d, device):
 
 
 class LoRMALinear(nn.Module):
-    """Multiplicative low-rank adaptation [2]: W' = T W, applied as y = T (W x).
-
-    variant "plus": T = I + (alpha/r) B A (additive rank inflation, rank(T) >= d - r).
-                    B = 0 at init, so T = I and the model starts exactly at Phase 1.
-    variant "pi":   T = pi(B A), pi = cyclic shift of row i by i positions (permutation rank
-                    inflation). Init: B[:, 0] = 1, A[0, 0] = 1, so B A = 1 e_0^T and pi(B A) = I;
-                    the other rank-1 terms start as LoRA does (A random, B = 0).
-    A is r x d_out and B is d_out x r (T acts on the output space of W).
-    """
     adapter = True
 
     def __init__(self, base: nn.Linear, r=8, alpha=16, variant="plus", dropout=0.0):
@@ -200,7 +145,7 @@ class LoRMALinear(nn.Module):
 
     def forward(self, x):
         h = self.base(x)
-        if self.variant == "plus":   # h + s B (A h): never builds the d x d matrix
+        if self.variant == "plus":
             return h + self.scale * F.linear(F.linear(self.drop(h), self.A.to(h.dtype)), self.B.to(h.dtype))
         return F.linear(self.drop(h), self.transform().to(h.dtype))
 
@@ -210,13 +155,12 @@ class LoRMALinear(nn.Module):
 
 NORM_KEYS = ("n1.weight", "n2.weight", "nc.weight", "norm.weight", "enc_norm.weight",
              "dec_norm.weight", "gn_weight")
-DEFAULT_TARGETS = ("wq", "wk", "wv", "wo")      # attention / retention projections in every arch
+DEFAULT_TARGETS = ("wq", "wk", "wv", "wo")
 METHODS = ("full", "lora", "lorma_plus", "lorma_pi", "norms", "head")
 
 
 def apply_peft(backbone, method, r=8, alpha=16, targets=DEFAULT_TARGETS, dropout=0.05,
                train_norms=False):
-    """Set up `backbone` for one fine-tuning technique. Returns a short summary dict."""
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
     for p in backbone.parameters():
@@ -249,9 +193,6 @@ def is_adapter_param(name):
     return name.endswith((".A", ".B"))
 
 
-# --------------------------------------------------------------------------------------
-# Training helpers
-# --------------------------------------------------------------------------------------
 def param_groups(model, lr_backbone, lr_head, lr_adapter, weight_decay=0.01):
     groups = {"backbone": [], "adapter": [], "head": []}
     for n, p in model.named_parameters():
@@ -273,7 +214,6 @@ def warmup_linear(opt, total_steps, warmup_frac=0.06):
 
 
 class AmpStep:
-    """loss.backward + clip + step, with a GradScaler when autocasting to fp16."""
 
     def __init__(self, opt, amp_dtype, clip=1.0):
         self.opt, self.clip = opt, clip
@@ -294,8 +234,6 @@ class AmpStep:
 
 
 def kd_loss(student_logits, teacher_logp, T=2.0, mask=None):
-    """KL(teacher_T || student_T) * T^2 [4]. teacher_logp are log-probs at T=1
-    (log-softmax is a valid logit vector), re-softened here."""
     t = F.softmax(teacher_logp.float() / T, -1)
     s = F.log_softmax(student_logits.float() / T, -1)
     kl = (t * (torch.log(t.clamp(min=1e-9)) - s)).sum(-1)
@@ -310,7 +248,6 @@ def trainable_state(model):
 
 
 def save_trainable(model, path, meta):
-    """Only the trained weights (adapters + head for PEFT; everything for full FT, in fp16)."""
     sd = {k: (v.half() if v.is_floating_point() else v) for k, v in trainable_state(model).items()}
     torch.save({"meta": meta, "state_dict": sd}, path)
 

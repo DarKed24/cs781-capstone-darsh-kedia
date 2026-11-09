@@ -1,36 +1,11 @@
 #!/usr/bin/env python3
 """CS781 Capstone, Phase 3: Rhetorical Role labelling (Darsh Kedia, 250311).
 
-One label per sentence, 13 labels, CL + IT domains pooled, Macro-F1.
-
-Model (hierarchical, in the spirit of Bhattacharya et al. 2019 / Kalamkar et al. 2022 [5]):
-  1. Consecutive sentences of a document are packed into windows of up to `max_len`
-     tokens (each sentence truncated to `max_sent_tokens`, prefixed with <sep>), so the
-     Phase 1 backbone sees each sentence together with its neighbours.
-  2. Backbone (any Phase 1 arch, any technique from ft_core) -> token states.
-  3. Mean pooling over each sentence's tokens -> sentence vectors.
-  4. A BiLSTM over the window's sentence vectors (document context, also gives the
-     causal archs right-hand context) -> linear layer -> 13 logits.
-  Windows overlap at inference; each sentence's log-probs are averaged over windows.
-  Loss: class-weighted cross-entropy (inverse sqrt frequency, for Macro-F1), plus an
-  optional distillation term against a teacher's per-sentence log-probs.
-
-CLI
-  train     python p3_rr.py train --data DIR --out RUN --tokenizer tokenizer.json --ckpt model_best.pt
-            [--method full|lora|lorma_plus|lorma_pi|norms|head] [--epochs 8] [--full]
-            [--keep_layers 6 --teacher RUN_T [--teacher RUN_T2] --kd_alpha 0.5 --kd_T 2]
-            Trains (on train, picking the best dev epoch; or on train+dev with --full),
-            then writes RUN/prediction.json, RUN/submission.zip, RUN/test_logp.pt,
-            RUN/dev_logp.pt (if dev was held out), RUN/train_logp.pt (with --save_train_logp,
-            for use as a distillation teacher) and RUN/run.json.
-  ensemble  python p3_rr.py ensemble --data DIR --out OUT RUN1 RUN2 ... [--bias_from RUN]
-  score     python p3_rr.py score --data DIR RUN_OR_PRED.json      (dev Macro-F1)
-  validate  python p3_rr.py validate --data DIR prediction.json
-
-[5] Bhattacharya et al. 2019, Identification of Rhetorical Roles of Sentences in Indian
-    Legal Judgments (hierarchical BiLSTM); Kalamkar et al. 2022, Corpus for Automatic
-    Structuring of Legal Documents; Malik et al. 2022, Semantic Segmentation of Legal
-    Documents via Rhetorical Roles (the CL/IT data); Joshi et al. 2024, IL-TUR.
+References:
+  [1] Bhattacharya et al. 2019, Identification of Rhetorical Roles in Legal Judgments
+  [2] Kalamkar et al. 2022, Corpus for Automatic Structuring of Legal Documents
+  [3] Malik et al. 2022, Semantic Segmentation of Legal Documents via Rhetorical Roles
+  [4] Joshi et al. 2024, IL-TUR
 """
 import argparse
 import glob
@@ -55,12 +30,9 @@ LABELS = ["Fact", "Issue", "ArgumentPetitioner", "ArgumentRespondent", "Statute"
           "RulingByLowerCourt", "RatioOfTheDecision", "RulingByPresentCourt", "None"]
 L2I = {l: i for i, l in enumerate(LABELS)}
 NC = len(LABELS)
-PAD, SEP = 0, 5   # Phase 1 tokenizer special ids
+PAD, SEP = 0, 5
 
 
-# --------------------------------------------------------------------------------------
-# Data
-# --------------------------------------------------------------------------------------
 def find(data, name):
     for p in (os.path.join(data, name), os.path.join(data, "Train", name), os.path.join(data, "Test", name)):
         if os.path.exists(p):
@@ -101,7 +73,6 @@ class Tok:
         self.tok = Tokenizer.from_file(path)
 
     def encode_sents(self, sents, max_sent_tokens):
-        """Per sentence: [<sep>] + head of its tokens (long sentences keep head and tail)."""
         out = []
         for enc in self.tok.encode_batch([" " + s.strip() for s in sents], add_special_tokens=False):
             ids = enc.ids
@@ -119,7 +90,6 @@ def encode_docs(tok, docs, max_sent_tokens):
 
 
 def pack(lengths, start, max_len, max_sents):
-    """Sentences start.. that fit in max_len tokens (at least one). Returns end index."""
     end, tot = start, 0
     while end < len(lengths) and end - start < max_sents and (tot + lengths[end] <= max_len or end == start):
         tot += lengths[end]
@@ -128,8 +98,6 @@ def pack(lengths, start, max_len, max_sents):
 
 
 def train_windows(docs, max_len, max_sents, rng):
-    """Non-overlapping windows; the first window of each doc gets a random size so the
-    boundaries move every epoch (cheap augmentation)."""
     wins = []
     for di, d in enumerate(docs):
         lens = [len(x) for x in d["ids"]]
@@ -143,8 +111,6 @@ def train_windows(docs, max_len, max_sents, rng):
 
 
 def eval_windows(docs, max_len, max_sents, overlap=0.5):
-    """Overlapping windows: the next window starts at the first sentence past `overlap`
-    of the current window's tokens."""
     wins = []
     for di, d in enumerate(docs):
         lens = [len(x) for x in d["ids"]]
@@ -191,9 +157,6 @@ def collate(docs, wins, teacher=None):
     return out
 
 
-# --------------------------------------------------------------------------------------
-# Model
-# --------------------------------------------------------------------------------------
 class RRModel(nn.Module):
     def __init__(self, backbone, context="lstm", ctx_hidden=384, dropout=0.1):
         super().__init__()
@@ -209,10 +172,10 @@ class RRModel(nn.Module):
         self.head = nn.Linear(out, NC)
 
     def forward(self, ids, valid, sid, n_sent):
-        h = self.backbone(ids, valid).float()                    # [B, T, H]
+        h = self.backbone(ids, valid).float()
         B, T, H = h.shape
         S = int(n_sent.max())
-        idx = torch.where(sid >= 0, sid, torch.full_like(sid, S))  # pad tokens -> dummy slot S
+        idx = torch.where(sid >= 0, sid, torch.full_like(sid, S))
         pooled = h.new_zeros(B, S + 1, H).scatter_add_(1, idx[..., None].expand(B, T, H), h)
         cnt = h.new_zeros(B, S + 1).scatter_add_(1, idx, torch.ones_like(idx, dtype=h.dtype))
         x = self.drop((pooled / cnt.clamp(min=1)[..., None])[:, :S])
@@ -221,7 +184,7 @@ class RRModel(nn.Module):
             x, _ = self.ctx(packed)
             x, _ = nn.utils.rnn.pad_packed_sequence(x, batch_first=True, total_length=S)
             x = self.drop(x)
-        return self.head(x)                                      # [B, S, NC]
+        return self.head(x)
 
 
 def build(args, ckpt=None):
@@ -232,11 +195,7 @@ def build(args, ckpt=None):
     return RRModel(bb, args.context, dropout=args.dropout), peft
 
 
-# --------------------------------------------------------------------------------------
-# Metrics / output
-# --------------------------------------------------------------------------------------
 def macro_f1(gold, pred, n=NC):
-    """sklearn f1_score(average='macro', labels=all 13, zero_division=0)."""
     tp, fp, fn = [0] * n, [0] * n, [0] * n
     for g, p in zip(gold, pred):
         if g == p:
@@ -258,8 +217,6 @@ def score_logp(docs, logp, bias=None):
 
 
 def tune_bias(docs, logp, rounds=3, grid=(-2, -1.5, -1, -0.5, -0.25, 0, 0.25, 0.5, 1, 1.5, 2, 3)):
-    """Per-label additive log-prob offsets that maximise dev Macro-F1 (coordinate ascent).
-    Small dev set, so the grid is coarse; check the gain is real before trusting it."""
     bias = torch.zeros(NC)
     best = score_logp(docs, logp, bias)[0]
     for _ in range(rounds):
@@ -299,9 +256,6 @@ def write_submission(pred, out_dir):
         z.write(pj, "prediction.json")
 
 
-# --------------------------------------------------------------------------------------
-# Train / predict
-# --------------------------------------------------------------------------------------
 @torch.no_grad()
 def doc_logp(model, docs, args, device, amp):
     model.eval()
@@ -421,7 +375,6 @@ def train(args):
         model.load_state_dict(best_state, strict=False)
     run = {"args": vars(args), "peft": peft, "trainable": n_tr, "history": hist,
            "arch": model.backbone.arch, "layers_kept": model.backbone.layers_kept}
-    # outputs
     if dev_docs is not None:
         dlp = doc_logp(model, dev_docs, args, device, amp)
         torch.save(dlp, os.path.join(args.out, "dev_logp.pt"))

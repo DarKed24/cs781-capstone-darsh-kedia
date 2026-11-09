@@ -7,7 +7,6 @@ import ft_core as C, p3_rr as R
 
 smoke = sys.argv[1]
 torch.manual_seed(0)
-# 1. adapters start at the base model and merge exactly
 base = nn.Linear(32, 48, bias=False)
 x = torch.randn(5, 32)
 for cls, kw in [(C.LoRALinear, {}), (C.LoRMALinear, {"variant": "plus"}), (C.LoRMALinear, {"variant": "pi"})]:
@@ -29,7 +28,6 @@ for arch in ["gpt", "unilm", "encdec", "retnet"]:
         a.targets = "wq,wk,wv,wo"; a.train_norms = False; a.context = "lstm"; a.dropout = 0.0
         model, peft = R.build(a)
         model.eval()
-        # 2. padding invariance: a short window alone vs batched next to a longer one
         docs = [{"id": "a", "ids": [[5, 10, 11, 12], [5, 13, 14]], "labels": [0, 1]},
                 {"id": "b", "ids": [[5] + list(range(20, 40)), [5, 41, 42], [5, 43]], "labels": [0, 1, 2]}]
         b1 = R.collate(docs, [(0, 0, 2)])

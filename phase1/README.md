@@ -11,11 +11,9 @@ documents, 512-word prompt, 128-word continuation, ROUGE-L / BLEU-4 against the 
 | `cs781_p1.py` | everything: tokenizer training, data preparation, the four architectures, distributed training, generation, pseudo-eval, `load_model()` used by all later phases |
 | `CS781-CP-Phase1-Darsh-Kedia-250311.ipynb` | Kaggle notebook (gpt and unilm; `ARCH`, `STAGE` cells) |
 | `CS781-CP-Phase1-encdec-...ipynb`, `...-retnet-...ipynb` | same notebook with `ARCH` preset |
-| `build_notebook.py` | regenerates the notebook from `cs781_p1.py` |
 | `tokenizer.json` | the trained 32k byte-level BPE tokenizer (pad 0, unk 1, `<s>` 2, `</s>` 3, `<mask>` 4, `<sep>` 5, 64 `<extra_id_k>`) |
 | `meta.json` | token counts per source of the prepared data |
 | `tests/test_models.py` | parameter counts in range; cached / recurrent decoding equals the full forward pass for all four archs; span corruption and MLM batches |
-| `NOTES.md` | design plan, budget, expected weaknesses and the results table |
 
 ## Architectures (all d_model 768, context 1024, tied embeddings, RMSNorm, pre-norm)
 - **gpt**: 12 layers, 12 heads, RoPE, SwiGLU FFN (2048). Causal LM. 109.5M.

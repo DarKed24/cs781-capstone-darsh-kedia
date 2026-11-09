@@ -8,7 +8,7 @@ reference (not a Phase 1 model, never submitted): 0.405 dev.
 
 Code: `../finetune/p5_lsi.py` (`prep`, `train`, `ensemble`, `baseline`), `../finetune/p5_post.py` (label-structure
 post-processing), notebook `../finetune/kaggle_p5/CS781-CP-Phase5-Darsh-Kedia-250311.ipynb`. The round-2 notebook
-(cue-based chunk selection) was built but not run. `NOTES.md` has the full method, ablations and failures.
+(cue-based chunk selection) was built but not run.
 
 ## Method
 First 3 × 512 + last 512 tokens (the whole document for ~70% of docs), each chunk mean-pooled from the backbone,
