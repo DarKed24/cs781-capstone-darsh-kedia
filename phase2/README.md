@@ -40,6 +40,6 @@ unilm checkpoint existed, fine-tuning it beat my best from-scratch ensemble by a
 | 9 | charw2v_ens2 | 2-seed ensemble of 8 | 0.4367 |
 | 10 | charw2v_ens3 | 3-seed ensemble of 8 | 0.4403 |
 | 11 | ens4_mixed | 10 + model 6 | 0.4390 |
-| 12 | unilm_full | Phase 1 unilm (200M tokens) fine-tuned, 4 epochs, fold1+2 | **0.5189** |
+| 12 | unilm_full | Phase 1 unilm (200M tokens) fine-tuned, 4 epochs (`EPOCHS = 4` in the notebook), fold1+2 | **0.5189** |
 
 Local fold2 (train on fold1) overestimated Codabench by ~0.04-0.05 for the BiLSTMs.

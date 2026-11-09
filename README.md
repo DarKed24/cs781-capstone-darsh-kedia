@@ -116,10 +116,12 @@ each of my local scorers against the official `evaluate_phaseN.py` (same numbers
 | `lorma_plus` (Bihany, Patel, Modi 2025) | (I + (α/r)·BA)·W, multiplicative, starts exactly at the Phase 1 model | 1.2M |
 | `lorma_pi` (same paper) | π(BA)·W with the cyclic-shift permutation, initialised so π(BA) = I | 1.2M |
 | `head` | frozen backbone, only the task head (probe baseline) | 0 |
-| KD | 6-layer student (67M) trained from a full-FT teacher, (1-α)·CE + α·T²·KL with α 0.5, T 2 | 67M |
+| KD | 6-layer student (67M, layers 0, 2, 4, 7, 9, 11 of the Phase 1 model) trained from a full-FT teacher, (1-α)·CE + α·T²·KL with α 0.5, T 2 | 67M |
 
-All four Phase 1 architectures are fine-tuned in Phases 3, 4 and 5. LoRMA and distillation are used in Phases
-3, 4 and 5, and LoRMA also in 6 and 7.
+All four Phase 1 architectures are fine-tuned in Phases 4 and 5 (Phase 3 used unilm, gpt and encdec; Phase 6
+used unilm, gpt and retnet). LoRMA and distillation are used in Phases 3, 4 and 5, and LoRMA also in 6 and 7.
+The distilled student keeps 6 evenly spaced layers (0, 2, 4, 7, 9, 11) of the Phase 1 model and starts from
+the Phase 1 weights, not from the fine-tuned teacher.
 
 ## Two data issues I found (and didn't use)
 

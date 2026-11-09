@@ -19,6 +19,12 @@ is cross-entropy weighted by inverse-sqrt class frequency because the metric is 
 random offset each epoch; at test time windows overlap by 50% and I average each sentence's log-probs. I pick the
 best epoch by dev Macro-F1 (my scorer matches `evaluate_phase3.py`).
 
+The 9 training runs come from the notebook. I built the ensembles `ens_all9` and `ens_all11`, and the encdec runs, in a
+later session from the saved log-probs, with the same code:
+`python p3_rr.py ensemble --data DATA_DIR --out OUT RUN_DIR1 RUN_DIR2 ...` (one run directory per member).
+The KD teacher for `kd_unilm6` (`unilm_full_all`) was trained on train+dev, so the student's dev score isn't a
+clean estimate; its test score is. There is no retnet run in this phase.
+
 ## All runs (dev = 10 docs; Codabench = test)
 | run | arch / method | dev | Codabench |
 |---|---|---|---|

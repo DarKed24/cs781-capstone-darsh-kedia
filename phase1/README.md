@@ -28,6 +28,7 @@ ROUGE-L and BLEU-4.
 - Decoding for the continuation task: temperature 0.7, top-k 50, top-p 0.9, repetition penalty 1.1, no-repeat 4-gram, up to 224 new tokens cut to the 128-word target.
 
 ## How to run (Kaggle, 2x T4)
+0. The notebook is saved with `STAGE="smoke"`, a 5-minute end-to-end check on a tiny model. Change it before a real run.
 1. `STAGE="prepare_train"`, `ARCH="gpt"`: trains the tokenizer, writes the token shards and trains gpt (~2.4 h).
 2. For the other archs attach the first notebook's output (for its `data/`) and set `ARCH`, `STAGE="train"`.
 3. `STAGE="generate"` writes the Codabench `prediction.json`; `STAGE="pseudo_eval"` scores the held-out pseudo-test.
