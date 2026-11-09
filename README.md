@@ -1,6 +1,6 @@
 # CS781 Capstone: In-House Legal Intelligence System
 
-Darsh Kedia (250311), IIT Kanpur. Codabench username `d_250311`.
+Darsh Kedia (250311), IIT Kanpur. Codabench username `dk_250311`.
 
 This is my code for all seven phases of the CS781 capstone. In Phase 1 I pretrained four small language models
 (about 110-125M parameters each) from scratch on the official Indian legal corpus. Phases 2-7 then fine-tune
